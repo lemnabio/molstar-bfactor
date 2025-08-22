@@ -1,29 +1,36 @@
 /**
- * Copyright (c) 2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import * as React from 'react';
+import { Volume } from '../../mol-model/volume';
+import { createVolumeRepresentationParams } from '../../mol-plugin-state/helpers/volume-representation-params';
 import { StructureHierarchyManager } from '../../mol-plugin-state/manager/structure/hierarchy';
 import { VolumeHierarchyManager } from '../../mol-plugin-state/manager/volume/hierarchy';
 import { LazyVolumeRef, VolumeRef, VolumeRepresentationRef } from '../../mol-plugin-state/manager/volume/hierarchy-state';
+import { PluginStateObject } from '../../mol-plugin-state/objects';
+import { StateTransforms } from '../../mol-plugin-state/transforms';
 import { FocusLoci } from '../../mol-plugin/behavior/dynamic/representation';
 import { VolumeStreaming } from '../../mol-plugin/behavior/dynamic/volume-streaming/behavior';
 import { InitVolumeStreaming } from '../../mol-plugin/behavior/dynamic/volume-streaming/transformers';
+import { PluginCommands } from '../../mol-plugin/commands';
 import { State, StateObjectCell, StateObjectSelector, StateSelection, StateTransform } from '../../mol-state';
+import { Color } from '../../mol-util/color';
+import { memoizeLatest } from '../../mol-util/memoize';
+import { ParamDefinition } from '../../mol-util/param-definition';
 import { CollapsableControls, CollapsableState, PurePluginUIComponent } from '../base';
 import { ActionMenu } from '../controls/action-menu';
-import { Button, ExpandGroup, IconButton } from '../controls/common';
+import { CombinedColorControl } from '../controls/color';
+import { Button, ControlGroup, ExpandGroup, IconButton } from '../controls/common';
+import { AddSvg, BlurOnSvg, CheckSvg, CloseSvg, DeleteOutlinedSvg, ErrorSvg, MoreHorizSvg, VisibilityOffOutlinedSvg, VisibilityOutlinedSvg } from '../controls/icons';
+import { ParameterControls, ParamOnChange } from '../controls/parameters';
 import { ApplyActionControl } from '../state/apply-action';
 import { UpdateTransformControl } from '../state/update-transform';
 import { BindingsHelp } from '../viewport/help';
-import { PluginCommands } from '../../mol-plugin/commands';
-import { BlurOnSvg, ErrorSvg, CheckSvg, AddSvg, VisibilityOffOutlinedSvg, VisibilityOutlinedSvg, DeleteOutlinedSvg, MoreHorizSvg } from '../controls/icons';
-import { PluginStateObject } from '../../mol-plugin-state/objects';
-import { StateTransforms } from '../../mol-plugin-state/transforms';
-import { createVolumeRepresentationParams } from '../../mol-plugin-state/helpers/volume-representation-params';
+import { Subject, throttleTime } from 'rxjs';
 
 interface VolumeStreamingControlState extends CollapsableState {
     isBusy: boolean
@@ -77,9 +84,9 @@ export class VolumeStreamingControls extends CollapsableControls<{}, VolumeStrea
         const rootCell = root && pivot.cell.parent.cells.get(root);
 
         const simpleApply = rootCell && rootCell.status === 'error'
-            ? { header: 'Error enabling', icon: ErrorSvg, title: rootCell.errorText }
+            ? { header: !!rootCell.errorText && rootCell.errorText?.includes('404') ? 'No Density Data Available' : 'Error Enabling', icon: ErrorSvg, title: rootCell.errorText }
             : rootCell && rootCell.obj?.data.entries.length === 0
-                ? { header: 'Error enabling', icon: ErrorSvg, title: 'No entry for streaming found' }
+                ? { header: 'Error Enabling', icon: ErrorSvg, title: 'No Entry for Streaming Found' }
                 : { header: 'Enable', icon: CheckSvg, title: 'Enable' };
 
         return <ApplyActionControl state={pivot.cell.parent} action={InitVolumeStreaming} initiallyCollapsed={true} nodeRef={pivot.cell.transform.ref} simpleApply={simpleApply} />;
@@ -142,7 +149,7 @@ export class VolumeSourceControls extends CollapsableControls<{}, VolumeSourceCo
             value: ref
         };
         return item;
-    }
+    };
 
     get hierarchyItems() {
         const mng = this.plugin.managers.volume.hierarchy;
@@ -195,7 +202,7 @@ export class VolumeSourceControls extends CollapsableControls<{}, VolumeSourceCo
         } else {
             this.lazyLoad(current.cell);
         }
-    }
+    };
 
     private async lazyLoad(cell: StateObjectCell<PluginStateObject.Volume.Lazy>) {
         const { url, isBinary, format, entryId, isovalues } = cell.obj!.data;
@@ -235,40 +242,61 @@ export class VolumeSourceControls extends CollapsableControls<{}, VolumeSourceCo
         if (!item) return;
         this.setState({ show: void 0 });
         (item.value as any)();
-    }
+    };
 
     toggleHierarchy = () => this.setState({ show: this.state.show !== 'hierarchy' ? 'hierarchy' : void 0 });
     toggleAddRepr = () => this.setState({ show: this.state.show !== 'add-repr' ? 'add-repr' : void 0 });
+    toggleVisibility = () => {
+        const mng = this.plugin.managers.volume.hierarchy;
+        const { current } = mng;
+        const globalVisibility = !current.volumes[0]?.representations[0]?.cell.state.isHidden;
+        this.plugin.managers.volume.hierarchy.toggleVisibility(current.volumes.flatMap(v => v.representations), globalVisibility ? 'hide' : 'show');
+    };
 
     renderControls() {
         const disabled = this.state.isBusy || this.isEmpty;
         const label = this.label;
         const selected = this.plugin.managers.volume.hierarchy.selection;
+        const mng = this.plugin.managers.volume.hierarchy;
+        const { current } = mng;
 
         return <>
             <div className='msp-flex-row' style={{ marginTop: '1px' }}>
                 <Button noOverflow flex onClick={this.toggleHierarchy} disabled={disabled} title={label}>{label}</Button>
                 {!this.isEmpty && selected && <IconButton svg={AddSvg} onClick={this.toggleAddRepr} title='Apply a structure presets to the current hierarchy.' toggleState={this.state.show === 'add-repr'} disabled={disabled} />}
+                {!this.isEmpty && <IconButton svg={VisibilityOutlinedSvg} onClick={this.toggleVisibility} toggleState={false} title='Toggle visibility of all volumes.' disabled={disabled} />}
             </div>
             {this.state.show === 'hierarchy' && <ActionMenu items={this.hierarchyItems} onSelect={this.selectCurrent} />}
             {this.state.show === 'add-repr' && <ActionMenu items={this.addActions} onSelect={this.selectAdd} />}
 
-            {selected && selected.representations.length > 0 && <div style={{ marginTop: '6px' }}>
-                {selected.representations.map(r => <VolumeRepresentationControls key={r.cell.transform.ref} representation={r} />)}
+            {current.volumes.length > 0 && <div style={{ marginTop: '6px' }}>
+                {current.volumes.map((volume) => <VolumeEntryControls volume={volume} key={volume.cell.transform.ref} />)}
             </div>}
         </>;
     }
 }
 
-type VolumeRepresentationEntryActions = 'update'
+function VolumeEntryControls({ volume }: { volume: VolumeRef }) {
+    return <>
+        <div className='msp-control-group-header' style={{ marginTop: '1px' }}>
+            <div><b>{volume.cell.obj?.label ?? 'n/a'}</b></div>
+        </div>
+        {volume.representations.map(r => <VolumeRepresentationControls key={r.cell.transform.ref} volume={volume} representation={r} />)}
+    </>;
+}
 
-class VolumeRepresentationControls extends PurePluginUIComponent<{ representation: VolumeRepresentationRef }, { action?: VolumeRepresentationEntryActions }> {
-    state = { action: void 0 as VolumeRepresentationEntryActions | undefined }
+type VolumeRepresentationEntryActions = 'update' | 'select-color'
+
+class VolumeRepresentationControls extends PurePluginUIComponent<{ volume: VolumeRef, representation: VolumeRepresentationRef }, { action?: VolumeRepresentationEntryActions }> {
+    state = { action: void 0 as VolumeRepresentationEntryActions | undefined };
+    updateIsoValueEvent = new Subject<{ isoValue: Volume.IsoValue }>();
 
     componentDidMount() {
         this.subscribe(this.plugin.state.events.cell.stateUpdated, e => {
             if (State.ObjectEvent.isCell(e, this.props.representation.cell)) this.forceUpdate();
         });
+
+        this.subscribe(this.updateIsoValueEvent.pipe(throttleTime(100, undefined, { leading: false, trailing: true })), this.updateIsoValue);
     }
 
     remove = () => this.plugin.managers.volume.hierarchy.remove([this.props.representation], true);
@@ -277,7 +305,11 @@ class VolumeRepresentationControls extends PurePluginUIComponent<{ representatio
         e.preventDefault();
         e.currentTarget.blur();
         this.plugin.managers.volume.hierarchy.toggleVisibility([this.props.representation]);
-    }
+    };
+
+    toggleColor = () => {
+        this.setState({ action: this.state.action === 'select-color' ? undefined : 'select-color' });
+    };
 
     toggleUpdate = () => this.setState({ action: this.state.action === 'update' ? void 0 : 'update' });
 
@@ -285,24 +317,77 @@ class VolumeRepresentationControls extends PurePluginUIComponent<{ representatio
         e.preventDefault();
         if (!this.props.representation.cell.parent) return;
         PluginCommands.Interactivity.Object.Highlight(this.plugin, { state: this.props.representation.cell.parent!, ref: this.props.representation.cell.transform.ref });
-    }
+    };
 
     clearHighlight = (e: React.MouseEvent<HTMLElement>) => {
         e.preventDefault();
         PluginCommands.Interactivity.ClearHighlights(this.plugin);
-    }
+    };
 
     focus = () => {
         const repr = this.props.representation;
-        const objects = this.props.representation.cell.obj?.data.repr.renderObjects;
+        const lociList = repr.cell.obj?.data.repr.getAllLoci();
         if (repr.cell.state.isHidden) this.plugin.managers.volume.hierarchy.toggleVisibility([this.props.representation], 'show');
-        this.plugin.managers.camera.focusRenderObjects(objects, { extraRadius: 1 });
+        if (lociList) this.plugin.managers.camera.focusLoci(lociList, { extraRadius: 1 });
+    };
+
+    private get color() {
+        const repr = this.props.representation.cell;
+        const isUniform = repr.transform.params?.colorTheme.name === 'uniform';
+        if (!isUniform) return void 0;
+        return repr.transform.params?.colorTheme.params.value;
     }
+
+    updateColor: ParamOnChange = ({ value }) => {
+        const t = this.props.representation.cell.transform;
+        return this.plugin.build().to(t.ref).update({
+            ...t.params,
+            colorTheme: {
+                name: 'uniform',
+                params: { value }
+            },
+        }).commit();
+    };
+
+    requestIsoValueUpdate = (values: { isoValue: Volume.IsoValue }) => {
+        this.updateIsoValueEvent.next(values);
+    };
+
+    updateIsoValue = (values: { isoValue: Volume.IsoValue }) => {
+        const t = this.props.representation.cell.transform;
+        return this.plugin.build().to(t.ref).update({
+            ...t.params,
+            type: {
+                ...t.params?.type,
+                params: {
+                    ...t.params?.type.params,
+                    isoValue: values.isoValue
+                }
+            }
+        }).commit();
+    };
+
+    get isIsoSurface() {
+        const repr = this.props.representation.cell;
+        return repr.transform.params?.type.name === 'isosurface';
+    }
+
+    isoValueParams = memoizeLatest((ref: any, type: string | undefined) => {
+        const repr = this.props.representation.cell;
+        const params = repr.transform.params;
+        if (params?.type.name !== 'isosurface') return undefined;
+        return { isoValue: Volume.createIsoValueParam(params.type.params.isoValue, this.props.volume.cell.obj?.data.grid?.stats) };
+    });
 
     render() {
         const repr = this.props.representation.cell;
+        const params = repr.transform.params;
+        const color = this.color;
+        const isoParams = this.isoValueParams(repr.transform.ref, params?.type.name);
+
         return <>
             <div className='msp-flex-row'>
+                {color !== void 0 && <Button style={{ backgroundColor: Color.toStyle(color), minWidth: 32, width: 32 }} onClick={this.toggleColor} />}
                 <Button noOverflow className='msp-control-button-label' title={`${repr.obj?.label}. Click to focus.`} onClick={this.focus} onMouseEnter={this.highlight} onMouseLeave={this.clearHighlight} style={{ textAlign: 'left' }}>
                     {repr.obj?.label}
                     <small className='msp-25-lower-contrast-text' style={{ float: 'right' }}>{repr.obj?.description}</small>
@@ -312,8 +397,21 @@ class VolumeRepresentationControls extends PurePluginUIComponent<{ representatio
                 <IconButton svg={MoreHorizSvg} onClick={this.toggleUpdate} title='Actions' toggleState={this.state.action === 'update'} />
             </div>
             {this.state.action === 'update' && !!repr.parent && <div style={{ marginBottom: '6px' }} className='msp-accent-offset'>
-                <UpdateTransformControl state={repr.parent} transform={repr.transform} customHeader='none' noMargin />
+                <div>
+                    {!!isoParams && <div style={{ marginBottom: '1px' }}>
+                        <ParameterControls params={isoParams} values={{ isoValue: params?.type.params.isoValue }} onChangeValues={this.requestIsoValueUpdate} />
+                    </div>}
+                    <UpdateTransformControl state={repr.parent} transform={repr.transform} customHeader='none' noMargin />
+                </div>
+            </div>}
+            {this.state.action === 'select-color' && color !== void 0 && <div style={{ marginBottom: '6px', marginTop: 1 }} className='msp-accent-offset'>
+                <ControlGroup header='Select Color' initialExpanded={true} hideExpander={true} hideOffset={true} onHeaderClick={this.toggleColor}
+                    topRightIcon={CloseSvg} noTopMargin childrenClassName='msp-viewport-controls-panel-controls'>
+                    <CombinedColorControl param={VolumeColorParam} value={this.color} onChange={this.updateColor} name='color' hideNameRow />
+                </ControlGroup>
             </div>}
         </>;
     }
 }
+
+const VolumeColorParam = ParamDefinition.Color(Color(0x121212));

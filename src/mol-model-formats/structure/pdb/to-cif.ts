@@ -1,12 +1,13 @@
 /**
- * Copyright (c) 2019-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Yana Rose <yana.v.rose@gmail.com>
  */
 
 import { substringStartsWith } from '../../../mol-util/string';
-import { CifCategory, CifFrame } from '../../../mol-io/reader/cif';
+import { CifCategory, CifField, CifFrame } from '../../../mol-io/reader/cif';
 import { Tokenizer } from '../../../mol-io/reader/common/text/tokenizer';
 import { PdbFile } from '../../../mol-io/reader/pdb/schema';
 import { parseCryst1, parseRemark350, parseMtrix } from './assembly';
@@ -16,10 +17,12 @@ import { ComponentBuilder } from '../common/component';
 import { EntityBuilder } from '../common/entity';
 import { Column } from '../../../mol-data/db';
 import { getMoleculeType } from '../../../mol-model/structure/model/types';
-import { getAtomSiteTemplate, addAtom, getAtomSite } from './atom-site';
+import { getAtomSiteTemplate, addAtom, getAtomSite, LabelAsymIdHelper } from './atom-site';
 import { addAnisotropic, getAnisotropicTemplate, getAnisotropic } from './anisotropic';
 import { parseConect } from './conect';
 import { isDebugMode } from '../../../mol-util/debug';
+import { PdbHeaderData, addHeader } from './header';
+import { mmCIF_Schema } from '../../../mol-io/reader/cif/schema/mmcif';
 
 export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
     const { lines } = pdb;
@@ -32,7 +35,7 @@ export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
     let anisotropicCount = 0;
     for (let i = 0, _i = lines.count; i < _i; i++) {
         const s = indices[2 * i], e = indices[2 * i + 1];
-        switch (data[s]) {
+        switch (data.charAt(s)) {
             case 'A':
                 if (substringStartsWith(data, s, e, 'ATOM  ')) atomCount++;
                 else if (substringStartsWith(data, s, e, 'ANISOU')) anisotropicCount++;
@@ -42,7 +45,7 @@ export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
                 break;
         }
     }
-
+    const header: PdbHeaderData = {};
     const atomSite = getAtomSiteTemplate(data, atomCount);
     const anisotropic = getAnisotropicTemplate(data, anisotropicCount);
     const entityBuilder = new EntityBuilder();
@@ -51,10 +54,12 @@ export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
 
     let modelNum = 0, modelStr = '';
     let conectRange: [number, number] | undefined = undefined;
+    let hasAssemblies = false;
+    const terIndices = new Set<number>();
 
     for (let i = 0, _i = lines.count; i < _i; i++) {
         let s = indices[2 * i], e = indices[2 * i + 1];
-        switch (data[s]) {
+        switch (data.charAt(s)) {
             case 'A':
                 if (substringStartsWith(data, s, e, 'ATOM  ')) {
                     if (!modelNum) { modelNum++; modelStr = '' + modelNum; }
@@ -93,7 +98,9 @@ export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
                 }
                 break;
             case 'H':
-                if (substringStartsWith(data, s, e, 'HETATM')) {
+                if (substringStartsWith(data, s, e, 'HEADER')) {
+                    addHeader(data, s, e, header);
+                } else if (substringStartsWith(data, s, e, 'HETATM')) {
                     if (!modelNum) { modelNum++; modelStr = '' + modelNum; }
                     addAtom(atomSite, modelStr, tokenizer, s, e, isPdbqt);
                 } else if (substringStartsWith(data, s, e, 'HELIX')) {
@@ -146,6 +153,7 @@ export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
                     }
                     helperCategories.push(...parseRemark350(lines, i, j));
                     i = j - 1;
+                    hasAssemblies = true;
                 }
                 break;
             case 'S':
@@ -161,7 +169,31 @@ export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
                 }
                 // TODO: SCALE record => cif.atom_sites.fract_transf_matrix, cif.atom_sites.fract_transf_vector
                 break;
+            case 'T':
+                if (substringStartsWith(data, s, e, 'TER')) {
+                    terIndices.add(atomSite.index);
+                }
         }
+    }
+
+    // build entry, struct_keywords and pdbx_database_status
+    if (header.id_code) {
+        const entry: CifCategory.SomeFields<mmCIF_Schema['entry']> = {
+            id: CifField.ofString(header.id_code)
+        };
+        helperCategories.push(CifCategory.ofFields('entry', entry));
+    }
+    if (header.classification) {
+        const struct_keywords: CifCategory.SomeFields<mmCIF_Schema['struct_keywords']> = {
+            pdbx_keywords: CifField.ofString(header.classification)
+        };
+        helperCategories.push(CifCategory.ofFields('struct_keywords', struct_keywords));
+    }
+    if (header.dep_date) {
+        const pdbx_database_status: CifCategory.SomeFields<mmCIF_Schema['pdbx_database_status']> = {
+            recvd_initial_deposition_date: CifField.ofString(header.dep_date)
+        };
+        helperCategories.push(CifCategory.ofFields('pdbx_database_status', pdbx_database_status));
     }
 
     // build entity and chem_comp categories
@@ -169,16 +201,17 @@ export async function pdbToMmCif(pdb: PdbFile): Promise<CifFrame> {
     const atomIds = Column.ofStringTokens(atomSite.auth_atom_id);
     const compIds = Column.ofStringTokens(atomSite.auth_comp_id);
     const asymIds = Column.ofStringTokens(atomSite.auth_asym_id);
+    const labelAsymIdHelper = new LabelAsymIdHelper(asymIds, atomSite.pdbx_PDB_model_num, terIndices, hasAssemblies);
     const componentBuilder = new ComponentBuilder(seqIds, atomIds);
     componentBuilder.setNames(heteroNames);
     entityBuilder.setNames(heteroNames);
     for (let i = 0, il = compIds.rowCount; i < il; ++i) {
         const compId = compIds.value(i);
         const moleculeType = getMoleculeType(componentBuilder.add(compId, i).type, compId);
-        atomSite.label_entity_id[i] = entityBuilder.getEntityId(compId, moleculeType, asymIds.value(i));
+        const asymId = labelAsymIdHelper.get(i);
+        atomSite.label_entity_id[i] = entityBuilder.getEntityId(compId, moleculeType, asymId);
     }
-
-    const atom_site = getAtomSite(atomSite);
+    const atom_site = getAtomSite(atomSite, labelAsymIdHelper, { hasAssemblies });
     if (!isPdbqt) delete atom_site.partial_charge;
 
     if (conectRange) {

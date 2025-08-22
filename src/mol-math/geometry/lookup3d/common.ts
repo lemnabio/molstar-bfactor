@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -41,7 +41,9 @@ export namespace Result {
 export interface Lookup3D<T = number> {
     // The result is mutated with each call to find.
     find(x: number, y: number, z: number, radius: number, result?: Result<T>): Result<T>,
+    nearest(x: number, y: number, z: number, k: number, stopIf?: Function, result?: Result<T>): Result<T>,
     check(x: number, y: number, z: number, radius: number): boolean,
+    approxNearest(x: number, y: number, z: number, radius: number, result?: Result<T>): Result<T>,
     readonly boundary: { readonly box: Box3D, readonly sphere: Sphere3D }
     /** transient result */
     readonly result: Result<T>

@@ -1,8 +1,10 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Jason Pattle <jpattle.exscientia.co.uk>
+ * @author Adam Midlik <midlik@gmail.com>
  */
 
 import { MarkerAction } from '../../../mol-util/marker-action';
@@ -43,10 +45,10 @@ export const HighlightLoci = PluginBehavior.create({
     name: 'representation-highlight-loci',
     category: 'interaction',
     ctor: class extends PluginBehavior.Handler<HighlightLociProps> {
-        private lociMarkProvider = (interactionLoci: Representation.Loci, action: MarkerAction, noRender?: boolean) => {
+        private lociMarkProvider = (interactionLoci: Representation.Loci, action: MarkerAction) => {
             if (!this.ctx.canvas3d || !this.params.mark) return;
-            this.ctx.canvas3d.mark(interactionLoci, action, noRender);
-        }
+            this.ctx.canvas3d.mark(interactionLoci, action);
+        };
         private getLoci(loci: Loci) {
             return this.params.preferAtoms && Bond.isLoci(loci) && loci.bonds.length === 2
                 ? Bond.toFirstStructureElementLoci(loci)
@@ -57,7 +59,7 @@ export const HighlightLoci = PluginBehavior.create({
                 if (!this.ctx.canvas3d || this.ctx.isBusy) return;
 
                 const loci = this.getLoci(current.loci);
-                if (this.params.ignore?.indexOf(loci.kind) >= 0) {
+                if (this.params.ignore.includes(loci.kind)) {
                     this.ctx.managers.interactivity.lociHighlights.highlightOnly({ repr: current.repr, loci: EmptyLoci });
                     return;
                 }
@@ -92,11 +94,11 @@ export const HighlightLoci = PluginBehavior.create({
 
 //
 
-const DefaultSelectLociBindings = {
+export const DefaultSelectLociBindings = {
     clickSelect: Binding.Empty,
-    clickToggleExtend: Binding([Trigger(B.Flag.Primary, M.create({ shift: true }))], 'Toggle extended selection', '${triggers} to extend selection along polymer'),
     clickSelectOnly: Binding.Empty,
-    clickToggle: Binding([Trigger(B.Flag.Primary, M.create())], 'Toggle selection', '${triggers} on element'),
+    clickToggle: Binding([Trigger(B.Flag.Primary, M.create())], 'Toggle selection', 'Click on element using ${triggers}'),
+    clickToggleExtend: Binding([Trigger(B.Flag.Primary, M.create({ shift: true }))], 'Toggle extended selection', 'Click on element using ${triggers} to extend selection along polymer'),
     clickDeselect: Binding.Empty,
     clickDeselectAllOnEmpty: Binding([Trigger(B.Flag.Primary, M.create())], 'Deselect all', 'Click on nothing using ${triggers}'),
 };
@@ -112,11 +114,11 @@ export const SelectLoci = PluginBehavior.create({
     name: 'representation-select-loci',
     category: 'interaction',
     ctor: class extends PluginBehavior.Handler<SelectLociProps> {
-        private spine: StateTreeSpine.Impl
-        private lociMarkProvider = (reprLoci: Representation.Loci, action: MarkerAction, noRender?: boolean) => {
+        private spine: StateTreeSpine.Impl;
+        private lociMarkProvider = (reprLoci: Representation.Loci, action: MarkerAction) => {
             if (!this.ctx.canvas3d || !this.params.mark) return;
-            this.ctx.canvas3d.mark({ loci: reprLoci.loci }, action, noRender);
-        }
+            this.ctx.canvas3d.mark({ loci: reprLoci.loci }, action);
+        };
         private getLoci(loci: Loci) {
             return this.params.preferAtoms && Bond.isLoci(loci) && loci.bonds.length === 2
                 ? Bond.toFirstStructureElementLoci(loci)
@@ -161,7 +163,7 @@ export const SelectLoci = PluginBehavior.create({
                 if (!this.ctx.canvas3d || this.ctx.isBusy || !this.ctx.selectionMode) return;
 
                 const loci = this.getLoci(current.loci);
-                if (this.params.ignore?.indexOf(loci.kind) >= 0) return;
+                if (this.params.ignore.includes(loci.kind)) return;
 
                 // only trigger the 1st action that matches
                 for (const [binding, action, condition] of actions) {
@@ -186,7 +188,7 @@ export const SelectLoci = PluginBehavior.create({
                         Structure.areEquivalent(structure, oldStructure) &&
                         Structure.areHierarchiesEqual(structure, oldStructure)) return;
 
-                    const reprs = this.ctx.state.data.select(StateSelection.Generators.ofType(SO.Molecule.Structure.Representation3D, ref));
+                    const reprs = this.ctx.state.data.select(StateSelection.children(ref).ofType(SO.Molecule.Structure.Representation3D));
                     for (const repr of reprs) this.applySelectMark(repr.transform.ref, true);
                 }
             });
@@ -212,11 +214,14 @@ export const DefaultLociLabelProvider = PluginBehavior.create({
         private f = {
             label: (loci: Loci) => {
                 const label: string[] = [];
-                if (StructureElement.Loci.is(loci) && loci.elements.length === 1) {
-                    const { unit: u } = loci.elements[0];
-                    const l = StructureElement.Location.create(loci.structure, u, u.elements[0]);
-                    const name = StructureProperties.entity.pdbx_description(l).join(', ');
-                    label.push(name);
+                if (StructureElement.Loci.is(loci)) {
+                    const entityNames = new Set<string>();
+                    for (const { unit: u } of loci.elements) {
+                        const l = StructureElement.Location.create(loci.structure, u, u.elements[0]);
+                        const name = StructureProperties.entity.pdbx_description(l).join(', ');
+                        entityNames.add(name);
+                    }
+                    if (entityNames.size === 1) entityNames.forEach(name => label.push(name));
                 }
                 label.push(lociLabel(loci));
                 return label.filter(l => !!l).join('</br>');
@@ -233,19 +238,26 @@ export const DefaultLociLabelProvider = PluginBehavior.create({
 
 //
 
-const DefaultFocusLociBindings = {
+export const DefaultFocusLociBindings = {
     clickFocus: Binding([
         Trigger(B.Flag.Primary, M.create()),
     ], 'Representation Focus', 'Click element using ${triggers}'),
     clickFocusAdd: Binding([
-        Trigger(B.Flag.Primary, M.create({ shift: true })),
+        Trigger(B.Flag.Primary, M.create({ control: true })),
+        Trigger(B.Flag.Primary, M.create({ meta: true })),
     ], 'Representation Focus Add', 'Click element using ${triggers}'),
+    clickFocusExtend: Binding([
+        Trigger(B.Flag.Primary, M.create({ shift: true })),
+    ], 'Representation Focus Extend', 'Click on element using ${triggers}'),
     clickFocusSelectMode: Binding([
         // default is empty
-    ], 'Representation Focus', 'Click element using ${triggers}'),
+    ], 'Representation Focus (Selection Mode)', 'Click element using ${triggers}'),
     clickFocusAddSelectMode: Binding([
         // default is empty
-    ], 'Representation Focus Add', 'Click element using ${triggers}'),
+    ], 'Representation Focus Add (Selection Mode)', 'Click element using ${triggers}'),
+    clickFocusExtendSelectMode: Binding([
+        // default is empty
+    ], 'Representation Focus Extend (Selection Mode)', 'Click on element using ${triggers}'),
 };
 const FocusLociParams = {
     bindings: PD.Value(DefaultFocusLociBindings, { isHidden: true }),
@@ -258,17 +270,38 @@ export const FocusLoci = PluginBehavior.create<FocusLociProps>({
     ctor: class extends PluginBehavior.Handler<FocusLociProps> {
         register(): void {
             this.subscribeObservable(this.ctx.behaviors.interaction.click, ({ current, button, modifiers }) => {
-                const { clickFocus, clickFocusAdd, clickFocusSelectMode, clickFocusAddSelectMode } = this.params.bindings;
+                const { clickFocus, clickFocusAdd, clickFocusExtend, clickFocusSelectMode, clickFocusAddSelectMode, clickFocusExtendSelectMode } = this.params.bindings;
+
+                const binding = this.ctx.selectionMode ? clickFocusSelectMode : clickFocus;
+                const matched = Binding.match(binding, button, modifiers);
+
+                const bindingAdd = this.ctx.selectionMode ? clickFocusAddSelectMode : clickFocusAdd;
+                const matchedAdd = Binding.match(bindingAdd, button, modifiers);
+
+                const bindingExtend = this.ctx.selectionMode ? clickFocusExtendSelectMode : clickFocusExtend;
+                const matchedExtend = Binding.match(bindingExtend, button, modifiers);
+
+                if (!matched && !matchedAdd && !matchedExtend) return;
+
+                // Support snapshot key property, in which case ignore the focus functionality
+                const snapshotKey = current.repr?.props?.snapshotKey?.trim() ?? '';
+                if (!this.ctx.selectionMode && matched && snapshotKey) {
+                    this.ctx.managers.snapshot.applyKey(snapshotKey);
+                    return;
+                }
+
+                // Support executing markdown commands associated with a visual
+                const markdownCommands = current.repr?.props?.markdownCommands;
+                if (!this.ctx.selectionMode && matched && typeof markdownCommands === 'object') {
+                    if (Object.keys(markdownCommands).length > 0) {
+                        this.ctx.managers.markdownExtensions.tryExecute('click', markdownCommands);
+                        return;
+                    }
+                }
 
                 // only apply structure focus for appropriate granularity
                 const { granularity } = this.ctx.managers.interactivity.props;
                 if (granularity !== 'residue' && granularity !== 'element') return;
-
-                const binding = this.ctx.selectionMode ? clickFocusSelectMode : clickFocus;
-                const matched = Binding.match(binding, button, modifiers);
-                const bindingAdd = this.ctx.selectionMode ? clickFocusAddSelectMode : clickFocusAdd;
-                const matchedAdd = Binding.match(bindingAdd, button, modifiers);
-                if (!matched && !matchedAdd) return;
 
                 const loci = Loci.normalize(current.loci, 'residue');
                 const entry = this.ctx.managers.structure.focus.current;
@@ -278,9 +311,13 @@ export const FocusLoci = PluginBehavior.create<FocusLociProps>({
                     if (matched) {
                         this.ctx.managers.structure.focus.setFromLoci(loci);
                     } else {
-                        this.ctx.managers.structure.focus.addFromLoci(loci);
+                        if (matchedExtend) {
+                            this.ctx.managers.structure.focus.extendFromLoci(loci);
+                        } else { // matchedAdd
+                            this.ctx.managers.structure.focus.toggleFromLoci(loci);
+                        }
 
-                        // focus-add is not handled in camera behavior, doing it here
+                        // focus-add and focus-extend is not handled in camera behavior, doing it here
                         const current = this.ctx.managers.structure.focus.current?.loci;
                         if (current) this.ctx.managers.camera.focusLoci(current);
                     }

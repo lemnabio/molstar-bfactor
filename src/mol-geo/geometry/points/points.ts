@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -25,6 +25,8 @@ import { createEmptyOverpaint } from '../overpaint-data';
 import { createEmptyTransparency } from '../transparency-data';
 import { hashFnv32a } from '../../../mol-data/util';
 import { createEmptyClipping } from '../clipping-data';
+import { createEmptySubstance } from '../substance-data';
+import { createEmptyEmissive } from '../emissive-data';
 
 /** Point cloud */
 export interface Points {
@@ -169,17 +171,23 @@ export namespace Points {
 
         const color = createColors(locationIt, positionIt, theme.color);
         const size = createSizes(locationIt, theme.size);
-        const marker = createMarkers(instanceCount * groupCount);
+        const marker = props.instanceGranularity
+            ? createMarkers(instanceCount, 'instance')
+            : createMarkers(instanceCount * groupCount, 'groupInstance');
         const overpaint = createEmptyOverpaint();
         const transparency = createEmptyTransparency();
+        const emissive = createEmptyEmissive();
+        const material = createEmptySubstance();
         const clipping = createEmptyClipping();
 
         const counts = { drawCount: points.pointCount, vertexCount: points.pointCount, groupCount, instanceCount };
 
         const invariantBoundingSphere = Sphere3D.clone(points.boundingSphere);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount, 0);
 
         return {
+            dGeometryType: ValueCell.create('points'),
+
             aPosition: points.centerBuffer,
             aGroup: points.groupBuffer,
             boundingSphere: ValueCell.create(boundingSphere),
@@ -190,6 +198,8 @@ export namespace Points {
             ...marker,
             ...overpaint,
             ...transparency,
+            ...emissive,
+            ...material,
             ...clipping,
             ...transform,
 
@@ -215,7 +225,7 @@ export namespace Points {
 
     function updateBoundingSphere(values: PointsValues, points: Points) {
         const invariantBoundingSphere = Sphere3D.clone(points.boundingSphere);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value, 0);
 
         if (!Sphere3D.equals(boundingSphere, values.boundingSphere.ref.value)) {
             ValueCell.update(values.boundingSphere, boundingSphere);

@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2017-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
-import { IntMap, SortedArray, Iterator, Segmentation, Interval, OrderedSet } from '../../../mol-data/int';
+import { IntMap, SortedArray, Iterator, Segmentation, Interval } from '../../../mol-data/int';
 import { UniqueArray } from '../../../mol-data/generic';
 import { SymmetryOperator } from '../../../mol-math/geometry/symmetry-operator';
 import { Model, ElementIndex } from '../model';
@@ -23,18 +23,17 @@ import { Carbohydrates } from './carbohydrates/data';
 import { computeCarbohydrates } from './carbohydrates/compute';
 import { Vec3, Mat4 } from '../../../mol-math/linear-algebra';
 import { idFactory } from '../../../mol-util/id-factory';
-import { GridLookup3D } from '../../../mol-math/geometry';
 import { UUID } from '../../../mol-util';
 import { CustomProperties } from '../../custom-property';
-import { AtomicHierarchy } from '../model/properties/atomic';
 import { StructureSelection } from '../query/selection';
-import { getBoundary, Boundary } from '../../../mol-math/geometry/boundary';
+import { Boundary } from '../../../mol-math/geometry/boundary';
 import { ElementSymbol } from '../model/types';
 import { CustomStructureProperty } from '../../../mol-model-props/common/custom-structure-property';
 import { Trajectory } from '../trajectory';
 import { RuntimeContext, Task } from '../../../mol-task';
 import { computeStructureBoundary } from './util/boundary';
 import { PrincipalAxes } from '../../../mol-math/linear-algebra/matrix/principal-axes';
+import { IntraUnitBondMapping, getIntraUnitBondMapping, getSerialMapping, SerialMapping } from './mapping';
 
 /** Internal structure state */
 type State = {
@@ -43,6 +42,8 @@ type State = {
     lookup3d?: StructureLookup3D,
     interUnitBonds?: InterUnitBonds,
     dynamicBonds: boolean,
+    interBondsValidUnit?: (unit: Unit) => boolean,
+    interBondsValidUnitPair?: (structure: Structure, unitA: Unit, unitB: Unit) => boolean,
     unitSymmetryGroups?: ReadonlyArray<Unit.SymmetryGroup>,
     unitSymmetryGroupsIndexMap?: IntMap<number>,
     unitsSortedByVolume?: ReadonlyArray<Unit>;
@@ -56,6 +57,7 @@ type State = {
     entityIndices?: ReadonlyArray<EntityIndex>,
     uniqueAtomicResidueIndices?: ReadonlyMap<UUID, ReadonlyArray<ResidueIndex>>,
     serialMapping?: SerialMapping,
+    intraUnitBondMapping?: IntraUnitBondMapping,
     hashCode: number,
     transformHash: number,
     elementCount: number,
@@ -84,7 +86,7 @@ class Structure {
     /** Count of all bonds (intra- and inter-unit) in the structure */
     get bondCount() {
         if (this.state.bondCount === -1) {
-            this.state.bondCount = this.interUnitBonds.edgeCount + Bond.getIntraUnitBondCount(this);
+            this.state.bondCount = (this.interUnitBonds.edgeCount / 2) + Bond.getIntraUnitBondCount(this);
         }
         return this.state.bondCount;
     }
@@ -232,12 +234,32 @@ class Structure {
 
     get interUnitBonds() {
         if (this.state.interUnitBonds) return this.state.interUnitBonds;
-        this.state.interUnitBonds = computeInterUnitBonds(this, { ignoreWater: !this.dynamicBonds });
+        if (this.parent && this.state.dynamicBonds === this.parent.state.dynamicBonds &&
+            this.parent.state.interUnitBonds && this.parent.state.interUnitBonds.edgeCount === 0
+        ) {
+            // no need to compute InterUnitBonds if parent's ones are empty
+            this.state.interUnitBonds = new InterUnitBonds(new Map());
+        } else {
+            this.state.interUnitBonds = computeInterUnitBonds(this, {
+                ignoreWater: !this.dynamicBonds,
+                ignoreIon: !this.dynamicBonds,
+                validUnit: this.state.interBondsValidUnit,
+                validUnitPair: this.state.interBondsValidUnitPair,
+            });
+        }
         return this.state.interUnitBonds;
     }
 
     get dynamicBonds() {
         return this.state.dynamicBonds;
+    }
+
+    get interBondsValidUnit() {
+        return this.state.interBondsValidUnit;
+    }
+
+    get interBondsValidUnitPair() {
+        return this.state.interBondsValidUnitPair;
     }
 
     get unitSymmetryGroups(): ReadonlyArray<Unit.SymmetryGroup> {
@@ -320,6 +342,10 @@ class Structure {
         return this.state.serialMapping || (this.state.serialMapping = getSerialMapping(this));
     }
 
+    get intraUnitBondMapping() {
+        return this.state.intraUnitBondMapping || (this.state.intraUnitBondMapping = getIntraUnitBondMapping(this));
+    }
+
     /**
      * If the structure is based on a single model or has a master-/representative-model, return it.
      * Otherwise throw an exception.
@@ -355,8 +381,8 @@ class Structure {
         return this.models.indexOf(m);
     }
 
-    remapModel(m: Model) {
-        const { dynamicBonds, interUnitBonds } = this.state;
+    remapModel(m: Model): Structure {
+        const { dynamicBonds, interUnitBonds, parent } = this.state;
         const units: Unit[] = [];
         for (const ug of this.unitSymmetryGroups) {
             const unit = ug.units[0].remapModel(m, dynamicBonds);
@@ -367,9 +393,15 @@ class Structure {
             }
         }
         return Structure.create(units, {
+            parent: parent?.remapModel(m),
             label: this.label,
             interUnitBonds: dynamicBonds ? undefined : interUnitBonds,
-            dynamicBonds
+            dynamicBonds,
+            interBondsValidUnit: this.state.interBondsValidUnit,
+            interBondsValidUnitPair: this.state.interBondsValidUnitPair,
+            coordinateSystem: this.state.coordinateSystem,
+            masterModel: this.state.masterModel,
+            representativeModel: this.state.representativeModel,
         });
     }
 
@@ -417,7 +449,6 @@ class Structure {
 
 function cmpUnits(units: ArrayLike<Unit>, i: number, j: number) {
     return units[i].id - units[j].id;
-
 }
 
 function getModels(s: Structure) {
@@ -578,40 +609,6 @@ function getAtomicResidueCount(structure: Structure): number {
     return atomicResidueCount;
 }
 
-interface SerialMapping {
-    /** Cumulative count of preceding elements for each unit */
-    cumulativeUnitElementCount: ArrayLike<number>
-    /** Unit index for each serial element in the structure */
-    unitIndices: ArrayLike<number>
-    /** Element index for each serial element in the structure */
-    elementIndices: ArrayLike<ElementIndex>
-    /** Get serial index of element in the structure */
-    getSerialIndex: (unit: Unit, element: ElementIndex) => Structure.SerialIndex
-}
-function getSerialMapping(structure: Structure): SerialMapping {
-    const { units, elementCount, unitIndexMap } = structure;
-    const cumulativeUnitElementCount = new Uint32Array(units.length);
-    const unitIndices = new Uint32Array(elementCount);
-    const elementIndices = new Uint32Array(elementCount) as unknown as ElementIndex[];
-    for (let i = 0, m = 0, il = units.length; i < il; ++i) {
-        cumulativeUnitElementCount[i] = m;
-        const { elements } = units[i];
-        for (let j = 0, jl = elements.length; j < jl; ++j) {
-            const mj = m + j;
-            unitIndices[mj] = i;
-            elementIndices[mj] = elements[j];
-        }
-        m += elements.length;
-    }
-    return {
-        cumulativeUnitElementCount,
-        unitIndices,
-        elementIndices,
-
-        getSerialIndex: (unit, element) => cumulativeUnitElementCount[unitIndexMap.get(unit.id)] + OrderedSet.indexOf(unit.elements, element) as Structure.SerialIndex
-    };
-}
-
 namespace Structure {
     export const Empty = create([]);
 
@@ -623,6 +620,8 @@ namespace Structure {
          * Also enables calculation of inter-unit bonds in water molecules.
          */
         dynamicBonds?: boolean,
+        interBondsValidUnit?: (unit: Unit) => boolean,
+        interBondsValidUnitPair?: (structure: Structure, unitA: Unit, unitB: Unit) => boolean,
         coordinateSystem?: SymmetryOperator
         label?: string
         /** Master model for structures of a protein model and multiple ligand models */
@@ -630,9 +629,6 @@ namespace Structure {
         /** Representative model for structures of a model trajectory */
         representativeModel?: Model
     }
-
-    /** Serial index of an element in the structure across all units */
-    export type SerialIndex = { readonly '@type': 'serial-index' } & number
 
     /** Represents a single structure */
     export interface Loci {
@@ -711,6 +707,12 @@ namespace Structure {
         if (props.parent) state.parent = props.parent.parent || props.parent;
         if (props.interUnitBonds) state.interUnitBonds = props.interUnitBonds;
 
+        if (props.interBondsValidUnit) state.interBondsValidUnit = props.interBondsValidUnit;
+        else if (props.parent) state.interBondsValidUnit = props.parent.interBondsValidUnit;
+
+        if (props.interBondsValidUnitPair) state.interBondsValidUnitPair = props.interBondsValidUnitPair;
+        else if (props.parent) state.interBondsValidUnitPair = props.parent.interBondsValidUnitPair;
+
         if (props.dynamicBonds) state.dynamicBonds = props.dynamicBonds;
         else if (props.parent) state.dynamicBonds = props.parent.dynamicBonds;
 
@@ -753,8 +755,6 @@ namespace Structure {
         return create(units, { representativeModel: first!, label: first!.label });
     }
 
-    const PARTITION = false;
-
     /**
      * Construct a Structure from a model.
      *
@@ -772,20 +772,18 @@ namespace Structure {
             const operator = atomicChainOperatorMappinng.get(c) || SymmetryOperator.Default;
             const start = chains.offsets[c];
 
-            // set to true for chains that consist of "single atom residues",
-            // note that it assumes there are no "zero atom residues"
-            let singleAtomResidues = AtomicHierarchy.chainResidueCount(model.atomicHierarchy, c) === chains.offsets[c + 1] - chains.offsets[c];
-
-            let multiChain = false;
+            let isMultiChain = false;
+            let isWater = false;
 
             if (isWaterChain(model, c)) {
+                isWater = true;
                 // merge consecutive water chains
                 while (c + 1 < chains.count && isWaterChain(model, c + 1 as ChainIndex)) {
                     const op1 = atomicChainOperatorMappinng.get(c);
                     const op2 = atomicChainOperatorMappinng.get(c + 1 as ChainIndex);
                     if (op1 !== op2) break;
 
-                    multiChain = true;
+                    isMultiChain = true;
                     c++;
                 }
             } else {
@@ -794,7 +792,6 @@ namespace Structure {
                     && chains.offsets[c + 1] - chains.offsets[c] === 1
                     && chains.offsets[c + 2] - chains.offsets[c + 1] === 1
                 ) {
-                    singleAtomResidues = true;
                     const e1 = index.getEntityFromChain(c);
                     const e2 = index.getEntityFromChain(c + 1 as ChainIndex);
                     if (e1 !== e2) break;
@@ -807,26 +804,19 @@ namespace Structure {
                     const op2 = atomicChainOperatorMappinng.get(c + 1 as ChainIndex);
                     if (op1 !== op2) break;
 
-                    multiChain = true;
+                    isMultiChain = true;
                     c++;
                 }
             }
 
             const elements = SortedArray.ofBounds(start as ElementIndex, chains.offsets[c + 1] as ElementIndex);
 
-            if (PARTITION) {
-                // check for polymer to exclude CA/P-only models
-                if (singleAtomResidues && !isPolymerChain(model, c)) {
-                    partitionAtomicUnitByAtom(model, elements, builder, multiChain, operator);
-                } else if (elements.length > 200000 || isWaterChain(model, c)) {
-                    // split up very large chains e.g. lipid bilayers, micelles or water with explicit H
-                    partitionAtomicUnitByResidue(model, elements, builder, multiChain, operator);
-                } else {
-                    builder.addUnit(Unit.Kind.Atomic, model, operator, elements, multiChain ? Unit.Trait.MultiChain : Unit.Trait.None);
-                }
-            } else {
-                builder.addUnit(Unit.Kind.Atomic, model, operator, elements, multiChain ? Unit.Trait.MultiChain : Unit.Trait.None);
-            }
+            let traits = Unit.Trait.None;
+            if (isMultiChain) traits |= Unit.Trait.MultiChain;
+            if (isWater) traits |= Unit.Trait.Water;
+            if (Model.isCoarseGrained(model)) traits |= Unit.Trait.CoarseGrained;
+
+            builder.addUnit(Unit.Kind.Atomic, model, operator, elements, traits);
         }
 
         const cs = model.coarseHierarchy;
@@ -845,70 +835,6 @@ namespace Structure {
     function isWaterChain(model: Model, chainIndex: ChainIndex) {
         const e = model.atomicHierarchy.index.getEntityFromChain(chainIndex);
         return model.entities.data.type.value(e) === 'water';
-    }
-
-    function isPolymerChain(model: Model, chainIndex: ChainIndex) {
-        const e = model.atomicHierarchy.index.getEntityFromChain(chainIndex);
-        return model.entities.data.type.value(e) === 'polymer';
-    }
-
-    function partitionAtomicUnitByAtom(model: Model, indices: SortedArray, builder: StructureBuilder, multiChain: boolean, operator: SymmetryOperator) {
-        const { x, y, z } = model.atomicConformation;
-        const position = { x, y, z, indices };
-        const lookup = GridLookup3D(position, getBoundary(position), 8192);
-        const { offset, count, array } = lookup.buckets;
-
-        const traits = (multiChain ? Unit.Trait.MultiChain : Unit.Trait.None) | (offset.length > 1 ? Unit.Trait.Partitioned : Unit.Trait.None);
-
-        builder.beginChainGroup();
-        for (let i = 0, _i = offset.length; i < _i; i++) {
-            const start = offset[i];
-            const set = new Int32Array(count[i]);
-            for (let j = 0, _j = count[i]; j < _j; j++) {
-                set[j] = indices[array[start + j]];
-            }
-            builder.addUnit(Unit.Kind.Atomic, model, operator, SortedArray.ofSortedArray(set), traits);
-        }
-        builder.endChainGroup();
-    }
-
-    // keeps atoms of residues together
-    function partitionAtomicUnitByResidue(model: Model, indices: SortedArray, builder: StructureBuilder, multiChain: boolean, operator: SymmetryOperator) {
-        const { residueAtomSegments } = model.atomicHierarchy;
-
-        const startIndices: number[] = [];
-        const endIndices: number[] = [];
-
-        const residueIt = Segmentation.transientSegments(residueAtomSegments, indices);
-        while (residueIt.hasNext) {
-            const residueSegment = residueIt.move();
-            startIndices[startIndices.length] = indices[residueSegment.start];
-            endIndices[endIndices.length] = indices[residueSegment.end];
-        }
-
-        const firstResidueAtomCount = endIndices[0] - startIndices[0];
-        const gridCellCount = 512 * firstResidueAtomCount;
-
-        const { x, y, z } = model.atomicConformation;
-        const position = { x, y, z, indices: SortedArray.ofSortedArray(startIndices) };
-        const lookup = GridLookup3D(position, getBoundary(position), gridCellCount);
-        const { offset, count, array } = lookup.buckets;
-
-        const traits = (multiChain ? Unit.Trait.MultiChain : Unit.Trait.None) | (offset.length > 1 ? Unit.Trait.Partitioned : Unit.Trait.None);
-
-        builder.beginChainGroup();
-        for (let i = 0, _i = offset.length; i < _i; i++) {
-            const start = offset[i];
-            const set: number[] = [];
-            for (let j = 0, _j = count[i]; j < _j; j++) {
-                const k = array[start + j];
-                for (let l = startIndices[k], _l = endIndices[k]; l < _l; l++) {
-                    set[set.length] = l;
-                }
-            }
-            builder.addUnit(Unit.Kind.Atomic, model, operator, SortedArray.ofSortedArray(new Int32Array(set)), traits);
-        }
-        builder.endChainGroup();
     }
 
     function addCoarseUnits(builder: StructureBuilder, model: Model, elements: CoarseElements, kind: Unit.Kind) {
@@ -935,9 +861,34 @@ namespace Structure {
         return create(units, { parent: s, coordinateSystem: newCS });
     }
 
+     export function instances(s: Structure, transforms: Mat4[]) {
+        for (const t of transforms) {
+            if (!Mat4.isRotationAndTranslation(t, SymmetryOperator.RotationTranslationEpsilon)) {
+                throw new Error('Only rotation/translation combination can be applied.');
+            }
+        }
+
+        const units: Unit[] = [];
+        let id = 0;
+        for (const u of s.units) {
+            const old = u.conformation.operator;
+            for (const transform of transforms) {
+                if (Mat4.isIdentity(transform)) {
+                    units.push(u);
+                    continue;
+                }
+                const op = SymmetryOperator.create(old.name, transform, old);
+                units.push(u.applyOperator(id++, op));
+            }
+        }
+
+        return create(units, { parent: s });
+    }
+
+
     export class StructureBuilder {
         private units: Unit[] = [];
-        private invariantId = idFactory()
+        private invariantId = idFactory();
 
         private chainGroupId = -1;
         private inChainGroup = false;
@@ -959,6 +910,14 @@ namespace Structure {
             const chainGroupId = this.inChainGroup ? this.chainGroupId : ++this.chainGroupId;
             const unit = Unit.create(this.units.length, invariantId, chainGroupId, traits, kind, model, operator, elements);
             return this.add(unit);
+        }
+
+        copyUnit(unit: Unit, options?: Unit.GetCopyOptions & { invariantId?: number }): Unit {
+            let invariantId = options?.invariantId;
+            if (invariantId === undefined) invariantId = this.invariantId();
+            const chainGroupId = this.inChainGroup ? this.chainGroupId : ++this.chainGroupId;
+            const newUnit = unit.getCopy(this.units.length, invariantId, chainGroupId, options);
+            return this.add(newUnit);
         }
 
         private add(unit: Unit) {
@@ -1024,6 +983,7 @@ namespace Structure {
     }
 
     export function areUnitIdsAndIndicesEqual(a: Structure, b: Structure) {
+        if (a === b) return true;
         if (!areUnitIdsEqual(a, b)) return false;
 
         for (let i = 0, il = a.units.length; i < il; i++) {
@@ -1111,11 +1071,11 @@ namespace Structure {
 
     const distVec = Vec3();
     function unitElementMinDistance(unit: Unit, p: Vec3, eRadius: number) {
-        const { elements, conformation: { position, r } } = unit, dV = distVec;
+        const { elements, conformation: c } = unit, dV = distVec;
         let minD = Number.MAX_VALUE;
         for (let i = 0, _i = elements.length; i < _i; i++) {
             const e = elements[i];
-            const d = Vec3.distance(p, position(e, dV)) - eRadius - r(e);
+            const d = Vec3.distance(p, c.position(e, dV)) - eRadius - c.r(e);
             if (d < minD) minD = d;
         }
         return minD;
@@ -1141,10 +1101,10 @@ namespace Structure {
 
         for (let i = 0, _i = units.length; i < _i; i++) {
             const unit = units[i];
-            const { elements, conformation: { position, r } } = unit;
+            const { elements, conformation: c } = unit;
             for (let i = 0, _i = elements.length; i < _i; i++) {
                 const e = elements[i];
-                const d = minDistanceToPoint(b, position(e, distPivot), r(e));
+                const d = minDistanceToPoint(b, c.position(e, distPivot), c.r(e));
                 if (d < minD) minD = d;
             }
         }
@@ -1169,7 +1129,7 @@ namespace Structure {
 
     /**
      * Iterate over all unit pairs of a structure and invokes callback for valid units
-     * and unit pairs if within a max distance.
+     * and unit pairs if their boundaries are within a max distance.
      */
     export function eachUnitPair(structure: Structure, callback: (unitA: Unit, unitB: Unit) => void, props: EachUnitPairProps) {
         const { maxRadius, validUnit, validUnitPair } = props;
@@ -1178,18 +1138,19 @@ namespace Structure {
         const lookup = structure.lookup3d;
         const imageCenter = Vec3();
 
-        for (const unit of structure.units) {
-            if (!validUnit(unit)) continue;
+        for (const unitA of structure.units) {
+            if (!validUnit(unitA)) continue;
 
-            const bs = unit.boundary.sphere;
-            Vec3.transformMat4(imageCenter, bs.center, unit.conformation.operator.matrix);
+            const bs = unitA.boundary.sphere;
+            Vec3.transformMat4(imageCenter, bs.center, unitA.conformation.operator.matrix);
             const closeUnits = lookup.findUnitIndices(imageCenter[0], imageCenter[1], imageCenter[2], bs.radius + maxRadius);
             for (let i = 0; i < closeUnits.count; i++) {
-                const other = structure.units[closeUnits.indices[i]];
-                if (!validUnit(other) || unit.id >= other.id || !validUnitPair(unit, other)) continue;
+                const unitB = structure.units[closeUnits.indices[i]];
+                if (unitA.id >= unitB.id) continue;
+                if (!validUnit(unitB) || !validUnitPair(unitA, unitB)) continue;
 
-                if (other.elements.length >= unit.elements.length) callback(unit, other);
-                else callback(other, unit);
+                if (unitB.elements.length >= unitA.elements.length) callback(unitA, unitB);
+                else callback(unitB, unitA);
             }
         }
     }
@@ -1317,6 +1278,9 @@ namespace Structure {
 
     export type Index = number;
     export const Index = CustomStructureProperty.createSimple<Index>('index', 'root');
+
+    export type MaxIndex = number;
+    export const MaxIndex = CustomStructureProperty.createSimple<MaxIndex>('max_index', 'root');
 
     const PrincipalAxesProp = '__PrincipalAxes__';
     export function getPrincipalAxes(structure: Structure): PrincipalAxes {

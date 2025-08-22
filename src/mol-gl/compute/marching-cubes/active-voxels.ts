@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -7,7 +7,7 @@
 import { ComputeRenderable, createComputeRenderable } from '../../renderable';
 import { WebGLContext } from '../../webgl/context';
 import { createComputeRenderItem } from '../../webgl/render-item';
-import { Values, TextureSpec, UniformSpec } from '../../renderable/schema';
+import { Values, TextureSpec, UniformSpec, DefineSpec } from '../../renderable/schema';
 import { Texture } from '../../../mol-gl/webgl/texture';
 import { ShaderCode } from '../../../mol-gl/shader-code';
 import { ValueCell } from '../../../mol-util';
@@ -16,12 +16,15 @@ import { QuadSchema, QuadValues } from '../util';
 import { getTriCount } from './tables';
 import { quad_vert } from '../../../mol-gl/shader/quad.vert';
 import { activeVoxels_frag } from '../../../mol-gl/shader/marching-cubes/active-voxels.frag';
+import { isTimingMode } from '../../../mol-util/debug';
+import { isWebGL2 } from '../../webgl/compat';
 
 const ActiveVoxelsSchema = {
     ...QuadSchema,
 
     tTriCount: TextureSpec('image-uint8', 'alpha', 'ubyte', 'nearest'),
     tVolumeData: TextureSpec('texture', 'rgba', 'ubyte', 'nearest'),
+    dValueChannel: DefineSpec('string', ['red', 'alpha']),
     uIsoValue: UniformSpec('f'),
 
     uGridDim: UniformSpec('v3'),
@@ -33,12 +36,17 @@ type ActiveVoxelsValues = Values<typeof ActiveVoxelsSchema>
 
 const ActiveVoxelsName = 'active-voxels';
 
+function valueChannel(ctx: WebGLContext, volumeData: Texture) {
+    return isWebGL2(ctx.gl) && volumeData.format === ctx.gl.RED ? 'red' : 'alpha';
+}
+
 function getActiveVoxelsRenderable(ctx: WebGLContext, volumeData: Texture, gridDim: Vec3, gridTexDim: Vec3, isoValue: number, scale: Vec2): ComputeRenderable<ActiveVoxelsValues> {
     if (ctx.namedComputeRenderables[ActiveVoxelsName]) {
         const v = ctx.namedComputeRenderables[ActiveVoxelsName].values as ActiveVoxelsValues;
 
         ValueCell.update(v.uQuadScale, scale);
         ValueCell.update(v.tVolumeData, volumeData);
+        ValueCell.update(v.dValueChannel, valueChannel(ctx, volumeData));
         ValueCell.updateIfChanged(v.uIsoValue, isoValue);
         ValueCell.update(v.uGridDim, gridDim);
         ValueCell.update(v.uGridTexDim, gridTexDim);
@@ -58,6 +66,7 @@ function createActiveVoxelsRenderable(ctx: WebGLContext, volumeData: Texture, gr
 
         uQuadScale: ValueCell.create(scale),
         tVolumeData: ValueCell.create(volumeData),
+        dValueChannel: ValueCell.create(valueChannel(ctx, volumeData)),
         uIsoValue: ValueCell.create(isoValue),
         uGridDim: ValueCell.create(gridDim),
         uGridTexDim: ValueCell.create(gridTexDim),
@@ -83,7 +92,8 @@ function setRenderingDefaults(ctx: WebGLContext) {
 }
 
 export function calcActiveVoxels(ctx: WebGLContext, volumeData: Texture, gridDim: Vec3, gridTexDim: Vec3, isoValue: number, gridScale: Vec2) {
-    const { gl, resources } = ctx;
+    if (isTimingMode) ctx.timer.mark('calcActiveVoxels');
+    const { gl, state, resources } = ctx;
     const width = volumeData.getWidth();
     const height = volumeData.getHeight();
 
@@ -104,17 +114,19 @@ export function calcActiveVoxels(ctx: WebGLContext, volumeData: Texture, gridDim
 
     activeVoxelsTex.attachFramebuffer(framebuffer, 0);
     setRenderingDefaults(ctx);
-    gl.viewport(0, 0, width, height);
-    gl.scissor(0, 0, width, height);
+    state.viewport(0, 0, width, height);
+    state.scissor(0, 0, width, height);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.scissor(0, 0, gridTexDim[0], gridTexDim[1]);
+    state.scissor(0, 0, gridTexDim[0], gridTexDim[1]);
     renderable.render();
 
     // console.log('gridScale', gridScale, 'gridTexDim', gridTexDim, 'gridDim', gridDim);
     // console.log('volumeData', volumeData);
     // console.log('at', readTexture(ctx, activeVoxelsTex));
+    // printTextureImage(readTexture(ctx, activeVoxelsTex), { scale: 0.75 });
 
     gl.finish();
+    if (isTimingMode) ctx.timer.markEnd('calcActiveVoxels');
 
     return activeVoxelsTex;
 }

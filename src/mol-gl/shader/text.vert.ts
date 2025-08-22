@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -29,15 +29,17 @@ uniform float uOffsetX;
 uniform float uOffsetY;
 uniform float uOffsetZ;
 
-// uniform bool ortho;
+uniform float uIsOrtho;
 uniform float uPixelRatio;
 uniform vec4 uViewport;
+uniform mat4 uInvHeadRotation;
+uniform bool uHasHeadRotation;
 
 varying vec2 vTexCoord;
 
-#include matrix_scale
-
 void main(void){
+    int vertexId = VertexID;
+
     #include assign_group
     #include assign_color_varying
     #include assign_marker_varying
@@ -46,7 +48,7 @@ void main(void){
 
     vTexCoord = aTexCoord;
 
-    float scale = matrixScale(uModelView);
+    float scale = uModelScale;
 
     float offsetX = uOffsetX * scale;
     float offsetY = uOffsetY * scale;
@@ -73,17 +75,22 @@ void main(void){
         offsetZ -= 0.001 * distance(uCameraPosition, (uProjection * mvCorner).xyz);
     }
 
-    mvCorner.xy += aMapping * size * scale;
-    mvCorner.x += offsetX;
-    mvCorner.y += offsetY;
+    vec3 cornerOffset = vec3(0.0);
+    cornerOffset.xy += aMapping * size * scale;
+    cornerOffset.x += offsetX;
+    cornerOffset.y += offsetY;
 
-    // TODO
-    // if(ortho){
-    //     mvCorner.xyz += normalize(-uCameraPosition) * offsetZ;
-    // } else {
-    //     mvCorner.xyz += normalize(-mvCorner.xyz) * offsetZ;
-    // }
-    mvCorner.xyz += normalize(-mvCorner.xyz) * offsetZ;
+    if (uHasHeadRotation) {
+        mvCorner.xyz += (uInvHeadRotation * vec4(cornerOffset, 1.0)).xyz;
+    } else {
+        mvCorner.xyz += cornerOffset;
+    }
+
+    if (uIsOrtho == 1.0) {
+        mvCorner.z += offsetZ;
+    } else {
+        mvCorner.xyz += normalize(-mvCorner.xyz) * offsetZ;
+    }
 
     gl_Position = uProjection * mvCorner;
 

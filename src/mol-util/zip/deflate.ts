@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2020-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  *
@@ -8,9 +8,9 @@
  */
 
 import { RuntimeContext } from '../../mol-task';
-import { NumberArray } from '../type-helpers';
+import { assertUnreachable, NumberArray } from '../type-helpers';
 import { _hufTree } from './huffman';
-import { U, revCodes, makeCodes } from './util';
+import { U, revCodes, makeCodes, checkCompressionStreamSupport } from './util';
 
 function DeflateContext(data: Uint8Array, out: Uint8Array, opos: number, lvl: number) {
     const { lits, strt, prev } = U;
@@ -116,7 +116,30 @@ const Opts = [
     /* 9 */ [32, 258, 258, 4096, 1] /* max compression */
 ] as const;
 
-export async function _deflateRaw(runtime: RuntimeContext, data: Uint8Array, out: Uint8Array, opos: number, lvl: number) {
+export async function _deflateRaw(runtime: RuntimeContext, data: Uint8Array, out: Uint8Array, opos: number, lvl: number): Promise<number> {
+    if (checkCompressionStreamSupport('deflate-raw')) {
+        const cs = new CompressionStream('deflate-raw');
+        const blob = new Blob([data]);
+        const compressedStream = blob.stream().pipeThrough(cs);
+        const reader = compressedStream.getReader();
+
+        let offset = opos;
+
+        const writeChunk = async (): Promise<undefined> => {
+            const { done, value } = await reader.read();
+            if (done) return;
+
+            if (runtime.shouldUpdate) {
+                await runtime.update({ message: 'Deflating...', current: offset, max: out.length });
+            }
+            out.set(value, offset);
+            offset += value.length;
+            return writeChunk();
+        };
+        await writeChunk();
+        return offset;
+    }
+
     const ctx = DeflateContext(data, out, opos, lvl);
     const { dlen } = ctx;
 
@@ -250,7 +273,7 @@ function _writeBlock(BFINAL: number, lits: Uint32Array, li: number, ebits: numbe
             pos = _codeTiny(lset, U.itree, out, pos);
             pos = _codeTiny(dset, U.itree, out, pos);
         } else {
-            throw new Error(`unknown BTYPE ${BTYPE}`);
+            assertUnreachable(BTYPE);
         }
 
         let off = o0;
@@ -284,7 +307,6 @@ function _copyExact(data: Uint8Array, off: number, len: number, out: Uint8Array,
     // for(var i=0; i<len; i++) out[p8+i]=data[off+i];
     return pos + ((len + 4) << 3);
 }
-
 
 /*
     Interesting facts:
@@ -324,7 +346,6 @@ function _codeTiny(set: number[], tree: number[], out: Uint8Array, pos: number) 
     }
     return pos;
 }
-
 
 function _lenCodes(tree: number[], set: number[]) {
     let len = tree.length;

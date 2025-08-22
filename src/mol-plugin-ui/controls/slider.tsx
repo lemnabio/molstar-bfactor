@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -8,6 +8,7 @@
 import * as React from 'react';
 import { TextInput } from './common';
 import { noop } from '../../mol-util';
+import { normalizeWheel } from '../../mol-util/input/input-observer';
 
 export class Slider extends React.Component<{
     min: number,
@@ -17,10 +18,11 @@ export class Slider extends React.Component<{
     onChange: (v: number) => void,
     onChangeImmediate?: (v: number) => void,
     disabled?: boolean,
-    onEnter?: () => void
+    onEnter?: () => void,
+    hideInput?: boolean
 }, { isChanging: boolean, current: number }> {
 
-    state = { isChanging: false, current: 0 }
+    state = { isChanging: false, current: 0 };
 
     static getDerivedStateFromProps(props: { value: number }, state: { isChanging: boolean, current: number }) {
         if (state.isChanging || props.value === state.current) return null;
@@ -29,17 +31,17 @@ export class Slider extends React.Component<{
 
     begin = () => {
         this.setState({ isChanging: true });
-    }
+    };
 
     end = (v: number) => {
         this.setState({ isChanging: false });
         this.props.onChange(v);
-    }
+    };
 
     updateCurrent = (current: number) => {
         this.setState({ current });
         this.props.onChangeImmediate?.(current);
-    }
+    };
 
     updateManually = (v: number) => {
         this.setState({ isChanging: true });
@@ -50,20 +52,29 @@ export class Slider extends React.Component<{
         if (n > this.props.max) n = this.props.max;
 
         this.setState({ current: n, isChanging: true });
-    }
+    };
 
     onManualBlur = () => {
         this.setState({ isChanging: false });
         this.props.onChange(this.state.current);
-    }
+    };
+
+    onMouseWheel = (e: WheelEvent) => {
+        const { dx, dy, dz } = normalizeWheel(e);
+        const sign = (dx >= 0 ? 1 : -1) * (dy >= 0 ? 1 : -1) * (dz >= 0 ? 1 : -1);
+        const shift = e.getModifierState('Shift');
+        const delta = sign * (this.props.max - this.props.min) / (shift ? 100 : 25);
+        this.updateCurrent(this.state.current + delta);
+    };
 
     render() {
         let step = this.props.step;
         if (step === void 0) step = 1;
-        return <div className='msp-slider'>
+        return <div className={!this.props.hideInput ? 'msp-slider' : 'msp-slider msp-slider-no-input'}>
             <div>
                 <SliderBase min={this.props.min} max={this.props.max} step={step} value={this.state.current} disabled={this.props.disabled}
                     onBeforeChange={this.begin}
+                    onWheel={this.onMouseWheel}
                     onChange={this.updateCurrent as any} onAfterChange={this.end as any} />
             </div>
             <div>
@@ -85,7 +96,7 @@ export class Slider2 extends React.Component<{
     onEnter?: () => void
 }, { isChanging: boolean, current: [number, number] }> {
 
-    state = { isChanging: false, current: [0, 1] as [number, number] }
+    state = { isChanging: false, current: [0, 1] as [number, number] };
 
     static getDerivedStateFromProps(props: { value: [number, number] }, state: { isChanging: boolean, current: [number, number] }) {
         if (state.isChanging || (props.value[0] === state.current[0] && props.value[1] === state.current[1])) return null;
@@ -94,16 +105,16 @@ export class Slider2 extends React.Component<{
 
     begin = () => {
         this.setState({ isChanging: true });
-    }
+    };
 
     end = (v: [number, number]) => {
         this.setState({ isChanging: false });
         this.props.onChange(v);
-    }
+    };
 
     updateCurrent = (current: [number, number]) => {
         this.setState({ current });
-    }
+    };
 
     updateMax = (v: number) => {
         let n = v;
@@ -112,7 +123,7 @@ export class Slider2 extends React.Component<{
         else if (n < this.props.min) n = this.props.min;
         if (n > this.props.max) n = this.props.max;
         this.props.onChange([this.state.current[0], n]);
-    }
+    };
 
     updateMin = (v: number) => {
         let n = v;
@@ -121,7 +132,7 @@ export class Slider2 extends React.Component<{
         if (n > this.state.current[1]) n = this.state.current[1];
         else if (n > this.props.max) n = this.props.max;
         this.props.onChange([n, this.state.current[1]]);
-    }
+    };
 
     render() {
         let step = this.props.step;
@@ -258,6 +269,7 @@ export interface SliderBaseProps {
     vertical?: boolean,
     allowCross?: boolean,
     pushable?: boolean | number,
+    onWheel?: (ev: WheelEvent) => any,
 }
 
 export interface SliderBaseState {
@@ -371,7 +383,7 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
         this.onStart(position);
         this.addDocumentEvents('mouse');
         pauseEvent(e);
-    }
+    };
 
     onMouseMove(e: MouseEvent) {
         const position = getMousePosition(this.props.vertical!, e);
@@ -462,7 +474,7 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
 
         const position = getTouchPosition(this.props.vertical!, e);
         this.onMove(e, position - this.dragOffset);
-    }
+    };
 
     onTouchStart = (e: TouchEvent) => {
         if (isNotTouchEvent(e)) return;
@@ -478,7 +490,7 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
         this.onStart(position);
         this.addDocumentEvents('touch');
         pauseEvent(e);
-    }
+    };
 
     /**
      * Returns an array of possible slider points, taking into account both
@@ -536,7 +548,7 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
         'touchend': (e: TouchEvent) => this.end('touch'),
         'mousemove': (e: MouseEvent) => this.onMouseMove(e),
         'mouseup': (e: MouseEvent) => this.end('mouse'),
-    }
+    };
 
     addDocumentEvents(type: 'touch' | 'mouse') {
         if (type === 'touch') {
@@ -552,7 +564,7 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
         const { min, max } = this.props;
         const ratio = (value - min) / (max - min);
         return ratio * 100;
-    }
+    };
 
     calcValue(offset: number) {
         const { vertical, min, max } = this.props;
@@ -626,9 +638,9 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
         const value = bounds[handle];
 
         let direction = 0;
-        if (bounds[handle + 1] - value < threshold!) {
+        if (bounds[handle + 1] - value < +threshold!) {
             direction = +1;
-        } else if (value - bounds[handle - 1] < threshold!) {
+        } else if (value - bounds[handle - 1] < +threshold!) {
             direction = -1;
         }
 
@@ -663,14 +675,12 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
         if (val >= max) {
             val = max;
         }
-        /* eslint-disable eqeqeq */
         if (!allowCross && handle != null && handle > 0 && val <= bounds[handle - 1]) {
             val = bounds[handle - 1];
         }
         if (!allowCross && handle != null && handle < bounds.length - 1 && val >= bounds[handle + 1]) {
             val = bounds[handle + 1];
         }
-        /* eslint-enable eqeqeq */
 
         const points = Object.keys(marks).map(parseFloat);
         if (step !== null) {
@@ -750,6 +760,7 @@ export class SliderBase extends React.Component<SliderBaseProps, SliderBaseState
             <div ref={this.sliderElement} className={sliderClassName}
                 onTouchStart={disabled ? noop : this.onTouchStart as any}
                 onMouseDown={disabled ? noop : this.onMouseDown as any}
+                onWheel={disabled ? noop : this.props.onWheel as any}
             >
                 <div className={`${prefixCls}-rail`} />
                 {handles}

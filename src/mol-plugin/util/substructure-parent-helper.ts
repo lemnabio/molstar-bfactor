@@ -18,7 +18,7 @@ class SubstructureParentHelper {
     readonly events = {
         updated: this.ev<{ ref: string, oldObj: PluginStateObject.Molecule.Structure | undefined, obj: PluginStateObject.Molecule.Structure }>(),
         removed: this.ev<{ ref: string, obj: PluginStateObject.Molecule.Structure | undefined }>(),
-    }
+    };
 
     // private decorators = new Map<string, string[]>();
     private root = new Map<Structure, { ref: string, count: number }>();
@@ -29,7 +29,7 @@ class SubstructureParentHelper {
         const children = tree.children.get(root);
         if (children.size !== 1) return root;
         const child = children.first();
-        if (tree.transforms.get(child).transformer.definition.isDecorator) {
+        if (child && tree.transforms.get(child).transformer.definition.isDecorator) {
             return this.getDecorator(child);
         }
         return root;

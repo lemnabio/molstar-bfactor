@@ -1,6 +1,6 @@
 
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2022 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -9,7 +9,7 @@
 import { mmCIF_Schema } from '../../../mol-io/reader/cif/schema/mmcif';
 import { SecondaryStructureType } from '../../../mol-model/structure/model/types';
 import { AtomicHierarchy } from '../../../mol-model/structure/model/properties/atomic';
-import { SecondaryStructure } from '../../../mol-model/structure/model/properties/seconday-structure';
+import { SecondaryStructure } from '../../../mol-model/structure/model/properties/secondary-structure';
 import { Column, Table } from '../../../mol-data/db';
 import { ChainIndex, ResidueIndex } from '../../../mol-model/structure/model/indexing';
 import { FormatPropertyProvider } from '../common/property';
@@ -54,9 +54,9 @@ namespace ModelSecondaryStructure {
 
 function getCoordinateType(conf: StructConf, sheetRange: StructSheetRange): CoordinateType {
     if (conf._rowCount > 0) {
-        if (conf.beg_label_seq_id.valueKind(0) !== Column.ValueKind.Present || conf.end_label_seq_id.valueKind(0) !== Column.ValueKind.Present) return 'auth';
+        if (conf.beg_label_seq_id.valueKind(0) !== Column.ValueKinds.Present || conf.end_label_seq_id.valueKind(0) !== Column.ValueKinds.Present) return 'auth';
     } else if (sheetRange) {
-        if (sheetRange.beg_label_seq_id.valueKind(0) !== Column.ValueKind.Present || sheetRange.end_label_seq_id.valueKind(0) !== Column.ValueKind.Present) return 'auth';
+        if (sheetRange.beg_label_seq_id.valueKind(0) !== Column.ValueKinds.Present || sheetRange.end_label_seq_id.valueKind(0) !== Column.ValueKinds.Present) return 'auth';
     }
     return 'label';
 }
@@ -83,18 +83,18 @@ function addHelices(cat: StructConf, coordinates: CoordinateType, map: Secondary
     const end_seq_id = coordinates === 'label' ? end_label_seq_id : end_auth_seq_id;
 
     for (let i = 0, _i = cat._rowCount; i < _i; i++) {
-        const type = SecondaryStructureType.create(pdbx_PDB_helix_class.valueKind(i) === Column.ValueKind.Present
+        const type = SecondaryStructureType.create(pdbx_PDB_helix_class.valueKind(i) === Column.ValueKinds.Present
             ? SecondaryStructureType.SecondaryStructurePdb[pdbx_PDB_helix_class.value(i)]
-            : conf_type_id.valueKind(i) === Column.ValueKind.Present
+            : conf_type_id.valueKind(i) === Column.ValueKinds.Present
                 ? SecondaryStructureType.SecondaryStructureMmcif[conf_type_id.value(i)]
                 : SecondaryStructureType.Flag.NA);
 
         const element: SecondaryStructure.Helix = {
             kind: 'helix',
             flags: type,
-            type_id: conf_type_id.valueKind(i) === Column.ValueKind.Present ? conf_type_id.value(i) : 'HELIX_P',
+            type_id: conf_type_id.valueKind(i) === Column.ValueKinds.Present ? conf_type_id.value(i) : 'helx_p',
             helix_class: pdbx_PDB_helix_class.value(i),
-            details: details.valueKind(i) === Column.ValueKind.Present ? details.value(i) : void 0
+            details: details.valueKind(i) === Column.ValueKinds.Present ? details.value(i) : void 0
         };
         const entry: SecondaryStructureEntry = {
             startSeqId: beg_seq_id.value(i),

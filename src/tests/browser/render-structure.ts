@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -28,6 +28,7 @@ import { SyncRuntimeContext } from '../../mol-task/execution/synchronous';
 import { AssetManager } from '../../mol-util/assets';
 import { MembraneOrientationProvider } from '../../extensions/anvil/prop';
 import { MembraneOrientationRepresentationProvider } from '../../extensions/anvil/representation';
+import { Vec2 } from '../../mol-math/linear-algebra/3d/vec2';
 
 const parent = document.getElementById('app')!;
 parent.style.width = '100%';
@@ -35,9 +36,14 @@ parent.style.height = '100%';
 
 const canvas = document.createElement('canvas');
 parent.appendChild(canvas);
-resizeCanvas(canvas, parent);
 
-const canvas3d = Canvas3D.create(Canvas3DContext.fromCanvas(canvas));
+const assetManager = new AssetManager();
+
+const canvas3dContext = Canvas3DContext.fromCanvas(canvas, assetManager);
+const canvas3d = Canvas3D.create(canvas3dContext);
+resizeCanvas(canvas, parent, canvas3dContext.pixelScale);
+canvas3dContext.syncPixelScale();
+canvas3d.requestResize();
 canvas3d.animate();
 
 const info = document.createElement('div');
@@ -51,7 +57,7 @@ parent.appendChild(info);
 
 let prevReprLoci = Representation.Loci.Empty;
 canvas3d.input.move.pipe(throttleTime(100)).subscribe(({ x, y }) => {
-    const pickingId = canvas3d.identify(x, y)?.id;
+    const pickingId = canvas3d.identify(Vec2.create(x, y))?.id;
     let label = '';
     if (pickingId) {
         const reprLoci = canvas3d.getLoci(pickingId);
@@ -68,7 +74,13 @@ canvas3d.input.move.pipe(throttleTime(100)).subscribe(({ x, y }) => {
     info.innerHTML = label;
 });
 
-async function parseCif(data: string|Uint8Array) {
+canvas3d.input.resize.subscribe(() => {
+    resizeCanvas(canvas, parent, canvas3dContext.pixelScale);
+    canvas3dContext.syncPixelScale();
+    canvas3d.requestResize();
+});
+
+async function parseCif(data: string | Uint8Array) {
     const comp = CIF.parse(data);
     const parsed = await comp.run();
     if (parsed.isError) throw parsed;
@@ -123,7 +135,7 @@ function getMembraneOrientationRepr() {
 }
 
 async function init() {
-    const ctx = { runtime: SyncRuntimeContext, assetManager: new AssetManager() };
+    const ctx = { runtime: SyncRuntimeContext, assetManager };
 
     const cif = await downloadFromPdb('3pqr');
     const models = await getModels(cif);

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2020-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -10,6 +10,9 @@ import { PluginContext } from './context';
 import { PdbDownloadProvider } from '../mol-plugin-state/actions/structure';
 import { EmdbDownloadProvider } from '../mol-plugin-state/actions/volume';
 import { StructureRepresentationPresetProvider } from '../mol-plugin-state/builder/structure/representation-preset';
+import { PluginFeatureDetection } from './features';
+import { SaccharideCompIdMapType } from '../mol-model/structure/structure/carbohydrates/constants';
+import { BackgroundProps } from '../mol-canvas3d/passes/background';
 
 export class PluginConfigItem<T = any> {
     toString() { return this.key; }
@@ -19,16 +22,6 @@ export class PluginConfigItem<T = any> {
 
 function item<T>(key: string, defaultValue?: T) { return new PluginConfigItem(key, defaultValue); }
 
-
-// adapted from https://stackoverflow.com/questions/9038625/detect-if-device-is-ios
-function is_iOS() {
-    if (typeof navigator === 'undefined' || typeof window === 'undefined') return false;
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    const isAppleDevice = navigator.userAgent.includes('Macintosh');
-    const isTouchScreen = navigator.maxTouchPoints >= 4; // true for iOS 13 (and hopefully beyond)
-    return !(window as any).MSStream && (isIOS || (isAppleDevice && isTouchScreen));
-}
-
 export const PluginConfig = {
     item,
     General: {
@@ -37,11 +30,13 @@ export const PluginConfig = {
         DisablePreserveDrawingBuffer: item('plugin-config.disable-preserve-drawing-buffer', false),
         PixelScale: item('plugin-config.pixel-scale', 1),
         PickScale: item('plugin-config.pick-scale', 0.25),
-        PickPadding: item('plugin-config.pick-padding', 3),
-        EnableWboit: item('plugin-config.enable-wboit', true),
+        Transparency: item<'blended' | 'wboit' | 'dpoit'>('plugin-config.transparency', PluginFeatureDetection.defaultTransparency),
         // as of Oct 1 2021, WebGL 2 doesn't work on iOS 15.
         // TODO: check back in a few weeks to see if it was fixed
-        PreferWebGl1: item('plugin-config.prefer-webgl1', is_iOS()),
+        PreferWebGl1: item('plugin-config.prefer-webgl1', PluginFeatureDetection.preferWebGl1),
+        AllowMajorPerformanceCaveat: item('plugin-config.allow-major-performance-caveat', false),
+        PowerPreference: item<WebGLContextAttributes['powerPreference']>('plugin-config.power-preference', 'high-performance'),
+        ResolutionMode: item<'auto' | 'scaled' | 'native'>('plugin-config.resolution-mode', 'auto'),
     },
     State: {
         DefaultServer: item('plugin-state.server', 'https://webchem.ncbr.muni.cz/molstar-state'),
@@ -54,14 +49,17 @@ export const PluginConfig = {
         CanStream: item('volume-streaming.can-stream', (s: Structure, plugin: PluginContext) => {
             return s.models.length === 1 && Model.probablyHasDensityMap(s.models[0]);
         }),
-        EmdbHeaderServer: item('volume-streaming.emdb-header-server', 'https://ftp.wwpdb.org/pub/emdb/structures'),
+        EmdbHeaderServer: item('volume-streaming.emdb-header-server', 'https://files.wwpdb.org/pub/emdb/structures'),
     },
     Viewport: {
+        ShowReset: item('viewer.show-reset-button', true),
         ShowExpand: item('viewer.show-expand-button', true),
         ShowControls: item('viewer.show-controls-button', true),
         ShowSettings: item('viewer.show-settings-button', true),
         ShowSelectionMode: item('viewer.show-selection-model-button', true),
         ShowAnimation: item('viewer.show-animation-button', true),
+        ShowTrajectoryControls: item('viewer.show-trajectory-controls', true),
+        ShowScreenshotControls: item('viewer.show-screenshot-controls', true),
     },
     Download: {
         DefaultPdbProvider: item<PdbDownloadProvider>('download.default-pdb-provider', 'pdbe'),
@@ -69,7 +67,12 @@ export const PluginConfig = {
     },
     Structure: {
         SizeThresholds: item('structure.size-thresholds', Structure.DefaultSizeThresholds),
-        DefaultRepresentationPresetParams: item<StructureRepresentationPresetProvider.CommonParams>('structure.default-representation-preset-params', { })
+        DefaultRepresentationPreset: item<string>('structure.default-representation-preset', 'auto'),
+        DefaultRepresentationPresetParams: item<StructureRepresentationPresetProvider.CommonParams>('structure.default-representation-preset-params', { }),
+        SaccharideCompIdMapType: item<SaccharideCompIdMapType>('structure.saccharide-comp-id-map-type', 'default'),
+    },
+    Background: {
+        Styles: item<[BackgroundProps, string][]>('background.styles', []),
     }
 };
 

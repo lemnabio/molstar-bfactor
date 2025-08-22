@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2019 Mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 Mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -273,6 +273,8 @@ const atomProperty = {
 
         sourceIndex: atomProp(Type.Num, 'Index of the atom/element in the input file.'),
         operatorName: atomProp(Type.Str, 'Name of the symmetry operator applied to this element.'),
+        instanceId: atomProp(Type.Str, 'Canonical name of the symmetry operator applied to this element.'),
+        operatorKey: atomProp(Type.Num, 'Key of the symmetry operator applied to this element.'),
         modelIndex: atomProp(Type.Num, 'Index of the model in the input file.'),
         modelLabel: atomProp(Type.Str, 'Label/header of the model in the input file.')
     },
@@ -325,7 +327,12 @@ const atomProperty = {
         modifiedParentName: atomProp(Type.Str, `'3-letter' code of the modifed parent residue.`),
         isNonStandard: atomProp(Type.Bool, 'True if this is a non-standard residue.'),
         chemCompType: atomProp(Type.Str, `Type of the chemical component as defined in mmCIF.`),
-    }
+    },
+
+    ihm: {
+        hasSeqId: symbol(Arguments.Dictionary({ 0: Argument(Type.Num) }), Type.Bool, 'Checks if the current element represents a given sequence id'),
+        overlapsSeqIdRange: symbol(Arguments.Dictionary({ beg: Argument(Type.Num), end: Argument(Type.Num) }), Type.Bool, 'Checks if the current element overlaps with the specified residue range'),
+    },
 };
 
 const bondProperty = {
@@ -333,6 +340,7 @@ const bondProperty = {
 
     flags: bondProp(Types.BondFlags),
     order: bondProp(Type.Num),
+    key: bondProp(Type.Num),
     length: bondProp(Type.Num),
     atomA: bondProp(Types.ElementReference),
     atomB: bondProp(Types.ElementReference)
@@ -356,5 +364,5 @@ export const structureQuery = {
     combinator,
     atomSet,
     atomProperty,
-    bondProperty: bondProperty
+    bondProperty
 };

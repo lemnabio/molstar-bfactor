@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -29,6 +29,8 @@ import { createEmptyTransparency } from '../transparency-data';
 import { hashFnv32a } from '../../../mol-data/util';
 import { GroupMapping, createGroupMapping } from '../../util';
 import { createEmptyClipping } from '../clipping-data';
+import { createEmptySubstance } from '../substance-data';
+import { createEmptyEmissive } from '../emissive-data';
 
 type TextAttachment = (
     'bottom-left' | 'bottom-center' | 'bottom-right' |
@@ -210,18 +212,24 @@ export namespace Text {
 
         const color = createColors(locationIt, positionIt, theme.color);
         const size = createSizes(locationIt, theme.size);
-        const marker = createMarkers(instanceCount * groupCount);
+        const marker = props.instanceGranularity
+            ? createMarkers(instanceCount, 'instance')
+            : createMarkers(instanceCount * groupCount, 'groupInstance');
         const overpaint = createEmptyOverpaint();
         const transparency = createEmptyTransparency();
+        const emissive = createEmptyEmissive();
+        const substance = createEmptySubstance();
         const clipping = createEmptyClipping();
 
         const counts = { drawCount: text.charCount * 2 * 3, vertexCount: text.charCount * 4, groupCount, instanceCount };
 
         const padding = getPadding(text.mappingBuffer.ref.value, text.depthBuffer.ref.value, text.charCount, getMaxSize(size));
         const invariantBoundingSphere = Sphere3D.expand(Sphere3D(), text.boundingSphere, padding);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount, 0);
 
         return {
+            dGeometryType: ValueCell.create('text'),
+
             aPosition: text.centerBuffer,
             aMapping: text.mappingBuffer,
             aDepth: text.depthBuffer,
@@ -235,6 +243,8 @@ export namespace Text {
             ...marker,
             ...overpaint,
             ...transparency,
+            ...emissive,
+            ...substance,
             ...clipping,
             ...transform,
 
@@ -245,7 +255,7 @@ export namespace Text {
             ...BaseGeometry.createValues(props, counts),
             uSizeFactor: ValueCell.create(props.sizeFactor),
 
-            uBorderWidth: ValueCell.create(clamp(props.borderWidth / 2, 0, 0.5)),
+            uBorderWidth: ValueCell.create(clamp(props.borderWidth, 0, 0.5)),
             uBorderColor: ValueCell.create(Color.toArrayNormalized(props.borderColor, Vec3.zero(), 0)),
             uOffsetX: ValueCell.create(props.offsetX),
             uOffsetY: ValueCell.create(props.offsetY),
@@ -283,7 +293,7 @@ export namespace Text {
     function updateBoundingSphere(values: TextValues, text: Text) {
         const padding = getPadding(values.aMapping.ref.value, values.aDepth.ref.value, text.charCount, getMaxSize(values));
         const invariantBoundingSphere = Sphere3D.expand(Sphere3D(), text.boundingSphere, padding);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value, 0);
 
         if (!Sphere3D.equals(boundingSphere, values.boundingSphere.ref.value)) {
             ValueCell.update(values.boundingSphere, boundingSphere);

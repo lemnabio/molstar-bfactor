@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Ventura Rivera <venturaxrivera@gmail.com>
  */
 
 import * as React from 'react';
@@ -25,8 +26,11 @@ import { StructureSelectionManager } from '../mol-plugin-state/manager/structure
 import { arrayEqual } from '../mol-util/array';
 
 const MaxDisplaySequenceLength = 5000;
+// TODO: add virtualized Select controls (at best with a search box)?
+const MaxSelectOptionsCount = 1000;
+const MaxSequenceWrappersCount = 30;
 
-function opKey(l: StructureElement.Location) {
+export function opKey(l: StructureElement.Location) {
     const ids = SP.unit.pdbx_struct_oper_list_ids(l);
     const ncs = SP.unit.struct_ncs_oper_id(l);
     const hkl = SP.unit.hkl(l);
@@ -34,12 +38,12 @@ function opKey(l: StructureElement.Location) {
     return `${ids.sort().join(',')}|${ncs}|${hkl}|${spgrOp}`;
 }
 
-function splitModelEntityId(modelEntityId: string) {
+export function splitModelEntityId(modelEntityId: string) {
     const [modelIdx, entityId] = modelEntityId.split('|');
     return [parseInt(modelIdx), entityId];
 }
 
-function getSequenceWrapper(state: { structure: Structure, modelEntityId: string, chainGroupId: number, operatorKey: string }, structureSelection: StructureSelectionManager): SequenceWrapper.Any | string {
+export function getSequenceWrapper(state: { structure: Structure, modelEntityId: string, chainGroupId: number, operatorKey: string }, structureSelection: StructureSelectionManager): SequenceWrapper.Any | string {
     const { structure, modelEntityId, chainGroupId, operatorKey } = state;
     const l = StructureElement.Location.create(structure);
     const [modelIdx, entityId] = splitModelEntityId(modelEntityId);
@@ -94,7 +98,7 @@ function getSequenceWrapper(state: { structure: Structure, modelEntityId: string
     }
 }
 
-function getModelEntityOptions(structure: Structure, polymersOnly = false) {
+export function getModelEntityOptions(structure: Structure, polymersOnly = false): [string, string][] {
     const options: [string, string][] = [];
     const l = StructureElement.Location.create(structure);
     const seen = new Set<string>();
@@ -118,13 +122,17 @@ function getModelEntityOptions(structure: Structure, polymersOnly = false) {
         const label = `${id}: ${description}`;
         options.push([key, label]);
         seen.add(key);
+
+        if (options.length > MaxSelectOptionsCount) {
+            return [['', 'Too many entities']];
+        }
     }
 
     if (options.length === 0) options.push(['', 'No entities']);
     return options;
 }
 
-function getChainOptions(structure: Structure, modelEntityId: string) {
+export function getChainOptions(structure: Structure, modelEntityId: string): [number, string][] {
     const options: [number, string][] = [];
     const l = StructureElement.Location.create(structure);
     const seen = new Set<number>();
@@ -144,13 +152,17 @@ function getChainOptions(structure: Structure, modelEntityId: string) {
 
         options.push([id, label]);
         seen.add(id);
+
+        if (options.length > MaxSelectOptionsCount) {
+            return [[-1, 'Too many chains']];
+        }
     }
 
-    if (options.length === 0) options.push([-1, 'No units']);
+    if (options.length === 0) options.push([-1, 'No chains']);
     return options;
 }
 
-function getOperatorOptions(structure: Structure, modelEntityId: string, chainGroupId: number) {
+export function getOperatorOptions(structure: Structure, modelEntityId: string, chainGroupId: number): [string, string][] {
     const options: [string, string][] = [];
     const l = StructureElement.Location.create(structure);
     const seen = new Set<string>();
@@ -168,13 +180,17 @@ function getOperatorOptions(structure: Structure, modelEntityId: string, chainGr
         const label = unit.conformation.operator.name;
         options.push([id, label]);
         seen.add(id);
+
+        if (options.length > MaxSelectOptionsCount) {
+            return [['', 'Too many operators']];
+        }
     }
 
     if (options.length === 0) options.push(['', 'No operators']);
     return options;
 }
 
-function getStructureOptions(state: State) {
+export function getStructureOptions(state: State) {
     const options: [string, string][] = [];
     const all: Structure[] = [];
 
@@ -200,11 +216,12 @@ type SequenceViewState = {
     modelEntityId: string,
     chainGroupId: number,
     operatorKey: string,
-    mode: SequenceViewMode
+    mode: SequenceViewMode,
+    sequenceViewModeParam: typeof SequenceViewModeParam,
 }
 
 export class SequenceView extends PluginUIComponent<{ defaultMode?: SequenceViewMode }, SequenceViewState> {
-    state: SequenceViewState = { structureOptions: { options: [], all: [] }, structure: Structure.Empty, structureRef: '', modelEntityId: '', chainGroupId: -1, operatorKey: '', mode: 'single' }
+    state: SequenceViewState = { structureOptions: { options: [], all: [] }, structure: Structure.Empty, structureRef: '', modelEntityId: '', chainGroupId: -1, operatorKey: '', mode: 'single', sequenceViewModeParam: SequenceViewModeParam };
 
     componentDidMount() {
         if (this.plugin.state.data.select(StateSelection.Generators.rootsOfType(PSO.Molecule.Structure)).length > 0) this.setState(this.getInitialState());
@@ -222,10 +239,20 @@ export class SequenceView extends PluginUIComponent<{ defaultMode?: SequenceView
         });
 
         this.subscribe(this.plugin.state.events.object.removed, ({ obj }) => {
-            if (obj && obj.type === PSO.Molecule.Structure.type && obj.data === this.state.structure) {
+            if (obj && obj.type === PSO.Molecule.Structure.type) {
                 this.sync();
             }
         });
+
+        const modeOptions = this.plugin.spec.components?.sequenceViewer?.modeOptions;
+        if (modeOptions) {
+            const modeSet = new Set(modeOptions);
+            const sequenceViewModeParam = {
+                ...SequenceViewModeParam,
+                options: SequenceViewModeParam.options.filter(([firstItem]) => modeSet.has(firstItem)),
+            };
+            this.setState({ sequenceViewModeParam: sequenceViewModeParam });
+        }
     }
 
     private sync() {
@@ -266,6 +293,7 @@ export class SequenceView extends PluginUIComponent<{ defaultMode?: SequenceView
                         }, this.plugin.managers.structure.selection),
                         label: `${cLabel} | ${eLabel}`
                     });
+                    if (wrappers.length > MaxSequenceWrappersCount) return [];
                 }
             }
         }
@@ -284,7 +312,9 @@ export class SequenceView extends PluginUIComponent<{ defaultMode?: SequenceView
             chainGroupId = this.state.chainGroupId;
             operatorKey = this.state.operatorKey;
         }
-        return { structureOptions, structure, structureRef, modelEntityId, chainGroupId, operatorKey, mode: this.props.defaultMode ?? 'single' };
+        const defaultMode = this.plugin.spec.components?.sequenceViewer?.defaultMode;
+        const initialMode = this.props.defaultMode ?? defaultMode ?? 'single';
+        return { structureOptions, structure, structureRef, modelEntityId, chainGroupId, operatorKey, mode: initialMode, sequenceViewModeParam: this.state.sequenceViewModeParam };
     }
 
     private get params() {
@@ -297,7 +327,7 @@ export class SequenceView extends PluginUIComponent<{ defaultMode?: SequenceView
             entity: PD.Select(entityOptions[0][0], entityOptions, { shortLabel: true }),
             chain: PD.Select(chainOptions[0][0], chainOptions, { shortLabel: true, twoColumns: true, label: 'Chain' }),
             operator: PD.Select(operatorOptions[0][0], operatorOptions, { shortLabel: true, twoColumns: true }),
-            mode: SequenceViewModeParam
+            mode: this.state.sequenceViewModeParam,
         };
     }
 
@@ -342,7 +372,7 @@ export class SequenceView extends PluginUIComponent<{ defaultMode?: SequenceView
                 break;
         }
         this.setState(state);
-    }
+    };
 
     render() {
         if (this.getStructure(this.state.structureRef) === Structure.Empty) {
@@ -363,11 +393,11 @@ export class SequenceView extends PluginUIComponent<{ defaultMode?: SequenceView
         return <div className='msp-sequence'>
             <div className='msp-sequence-select'>
                 <Icon svg={HelpOutlineSvg} style={{ cursor: 'help', position: 'absolute', right: 0, top: 0 }}
-                    title='This shows a single sequence. Use the controls to show a different sequence.' />
+                    title='This shows a single sequence. Use the controls to show a different sequence. &#10;Use Ctrl or Cmd key to add a sequence range to focus; use Shift key to extend last focused/selected range.' />
 
                 <span>Sequence of</span>
                 <PureSelectControl title={`[Structure] ${PD.optionLabel(params.structure, values.structure)}`} param={params.structure} name='structure' value={values.structure} onChange={this.setParamProps} />
-                <PureSelectControl title={`[Mode]`} param={SequenceViewModeParam} name='mode' value={values.mode} onChange={this.setParamProps} />
+                <PureSelectControl title={`[Mode]`} param={this.state.sequenceViewModeParam} name='mode' value={values.mode} onChange={this.setParamProps} />
                 {values.mode === 'single' && <PureSelectControl title={`[Entity] ${PD.optionLabel(params.entity, values.entity)}`} param={params.entity} name='entity' value={values.entity} onChange={this.setParamProps} />}
                 {values.mode === 'single' && <PureSelectControl title={`[Chain] ${PD.optionLabel(params.chain, values.chain)}`} param={params.chain} name='chain' value={values.chain} onChange={this.setParamProps} />}
                 {params.operator.options.length > 1 && <>

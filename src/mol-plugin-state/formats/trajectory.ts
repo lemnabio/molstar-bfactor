@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Ludovic Autin <ludovic.autin@gmail.com>
  */
 
 import { StateTransforms } from '../transforms';
@@ -75,7 +76,7 @@ export const CifCoreProvider: TrajectoryFormatProvider = {
     visuals: defaultVisuals
 };
 
-function directTrajectory<P>(transformer: StateTransformer<PluginStateObject.Data.String | PluginStateObject.Data.Binary, PluginStateObject.Molecule.Trajectory, P>, transformerParams?: P): TrajectoryFormatProvider['parse'] {
+function directTrajectory<P extends {}>(transformer: StateTransformer<PluginStateObject.Data.String | PluginStateObject.Data.Binary, PluginStateObject.Molecule.Trajectory, P>, transformerParams?: P): TrajectoryFormatProvider['parse'] {
     return async (plugin, data, params) => {
         const state = plugin.state.data;
         const trajectory = await state.build().to(data)
@@ -109,6 +110,24 @@ export const XyzProvider: TrajectoryFormatProvider = {
     category: TrajectoryFormatCategory,
     stringExtensions: ['xyz'],
     parse: directTrajectory(StateTransforms.Model.TrajectoryFromXYZ),
+    visuals: defaultVisuals
+};
+
+export const LammpsDataProvider: TrajectoryFormatProvider = {
+    label: 'Lammps Data',
+    description: 'Lammps Data',
+    category: TrajectoryFormatCategory,
+    stringExtensions: ['data'],
+    parse: directTrajectory(StateTransforms.Model.TrajectoryFromLammpsData),
+    visuals: defaultVisuals
+};
+
+export const LammpsTrajectoryDataProvider: TrajectoryFormatProvider = {
+    label: 'Lammps Trajectory Data',
+    description: 'Lammps Trajectory Data',
+    category: TrajectoryFormatCategory,
+    stringExtensions: ['lammpstrj'],
+    parse: directTrajectory(StateTransforms.Model.TrajectoryFromLammpsTrajData),
     visuals: defaultVisuals
 };
 
@@ -156,6 +175,8 @@ export const BuiltInTrajectoryFormats = [
     ['pdbqt', PdbqtProvider] as const,
     ['gro', GroProvider] as const,
     ['xyz', XyzProvider] as const,
+    ['lammps_data', LammpsDataProvider] as const,
+    ['lammps_traj_data', LammpsTrajectoryDataProvider] as const,
     ['mol', MolProvider] as const,
     ['sdf', SdfProvider] as const,
     ['mol2', Mol2Provider] as const,

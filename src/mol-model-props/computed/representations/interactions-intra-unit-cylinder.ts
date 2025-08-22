@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2019-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Paul Pillot <paul.pillot@tandemai.com>
  */
 
 import { Unit, Structure, StructureElement } from '../../../mol-model/structure';
@@ -19,9 +20,13 @@ import { UnitsMeshParams, UnitsVisual, UnitsMeshVisual } from '../../../mol-repr
 import { VisualUpdateState } from '../../../mol-repr/util';
 import { LocationIterator } from '../../../mol-geo/util/location-iterator';
 import { Interactions } from '../interactions/interactions';
-import { InteractionFlag } from '../interactions/common';
+import { FeatureType, InteractionFlag } from '../interactions/common';
 import { Sphere3D } from '../../../mol-math/geometry';
-import { StructureGroup } from '../../../mol-repr/structure/visual/util/common';
+import { StructureGroup, isHydrogen } from '../../../mol-repr/structure/visual/util/common';
+import { assertUnreachable } from '../../../mol-util/type-helpers';
+import { InteractionsSharedParams } from './shared';
+import { InteractionType } from '../interactions/common';
+import { eachIntraBondedAtom } from '../chemistry/util';
 
 async function createIntraUnitInteractionsCylinderMesh(ctx: VisualContext, unit: Unit, structure: Structure, theme: Theme, props: PD.Values<InteractionsIntraUnitParams>, mesh?: Mesh) {
     if (!Unit.isAtomic(unit)) return Mesh.createEmpty(mesh);
@@ -36,37 +41,115 @@ async function createIntraUnitInteractionsCylinderMesh(ctx: VisualContext, unit:
     const features = interactions.unitsFeatures.get(unit.id);
     const contacts = interactions.unitsContacts.get(unit.id);
 
-    const { x, y, z, members, offsets } = features;
-    const { edgeCount, a, b, edgeProps: { flag } } = contacts;
-    const { sizeFactor } = props;
+    const { x, y, z, members, offsets, types } = features;
+    const { edgeCount, a, b, edgeProps: { flag, type } } = contacts;
+    const { sizeFactor, ignoreHydrogens, ignoreHydrogensVariant, parentDisplay } = props;
 
     if (!edgeCount) return Mesh.createEmpty(mesh);
+
+    const { elements, conformation: c } = unit;
+    const p = Vec3();
+    const pA = Vec3();
+    const pB = Vec3();
 
     const builderProps = {
         linkCount: edgeCount * 2,
         position: (posA: Vec3, posB: Vec3, edgeIndex: number) => {
-            Vec3.set(posA, x[a[edgeIndex]], y[a[edgeIndex]], z[a[edgeIndex]]);
-            Vec3.set(posB, x[b[edgeIndex]], y[b[edgeIndex]], z[b[edgeIndex]]);
+            const t = type[edgeIndex];
+            if ((!ignoreHydrogens || ignoreHydrogensVariant !== 'all') && (
+                t === InteractionType.HydrogenBond || (t === InteractionType.WeakHydrogenBond && ignoreHydrogensVariant !== 'non-polar'))
+            ) {
+                const idxA = members[offsets[a[edgeIndex]]];
+                const idxB = members[offsets[b[edgeIndex]]];
+                c.invariantPosition(elements[idxA], pA);
+                c.invariantPosition(elements[idxB], pB);
+                let minDistA = Vec3.distance(pA, pB);
+                let minDistB = minDistA;
+                Vec3.copy(posA, pA);
+                Vec3.copy(posB, pB);
+                const donorType = t === InteractionType.HydrogenBond ? FeatureType.HydrogenDonor : FeatureType.WeakHydrogenDonor;
+                const isHydrogenDonorA = types[offsets[a[edgeIndex]]] === donorType;
+
+                if (isHydrogenDonorA) {
+                    eachIntraBondedAtom(unit, idxA, (_, idx) => {
+                        if (isHydrogen(structure, unit, elements[idx], 'all')) {
+                            c.invariantPosition(elements[idx], p);
+                            const dist = Vec3.distance(p, pB);
+                            if (dist < minDistA) {
+                                minDistA = dist;
+                                Vec3.copy(posA, p);
+                            }
+                        }
+                    });
+                } else {
+                    eachIntraBondedAtom(unit, idxB, (_, idx) => {
+                        if (isHydrogen(structure, unit, elements[idx], 'all')) {
+                            c.invariantPosition(elements[idx], p);
+                            const dist = Vec3.distance(p, pA);
+                            if (dist < minDistB) {
+                                minDistB = dist;
+                                Vec3.copy(posB, p);
+                            }
+                        }
+                    });
+                }
+            } else {
+                Vec3.set(posA, x[a[edgeIndex]], y[a[edgeIndex]], z[a[edgeIndex]]);
+                Vec3.set(posB, x[b[edgeIndex]], y[b[edgeIndex]], z[b[edgeIndex]]);
+            }
         },
         style: (edgeIndex: number) => LinkStyle.Dashed,
         radius: (edgeIndex: number) => {
-            location.element = unit.elements[members[offsets[a[edgeIndex]]]];
+            location.element = elements[members[offsets[a[edgeIndex]]]];
             const sizeA = theme.size.size(location);
-            location.element = unit.elements[members[offsets[b[edgeIndex]]]];
+            location.element = elements[members[offsets[b[edgeIndex]]]];
             const sizeB = theme.size.size(location);
             return Math.min(sizeA, sizeB) * sizeFactor;
         },
-        ignore: (edgeIndex: number) => (
-            flag[edgeIndex] === InteractionFlag.Filtered ||
-            // TODO: check all members
-            (!!childUnit && !SortedArray.has(childUnit.elements, unit.elements[members[offsets[a[edgeIndex]]]]))
-        )
+        ignore: (edgeIndex: number) => {
+            if (flag[edgeIndex] === InteractionFlag.Filtered) return true;
+
+            if (childUnit) {
+                if (parentDisplay === 'stub') {
+                    const f = a[edgeIndex];
+                    for (let i = offsets[f], il = offsets[f + 1]; i < il; ++i) {
+                        const e = elements[members[offsets[i]]];
+                        if (!SortedArray.has(childUnit.elements, e)) return true;
+                    }
+                } else if (parentDisplay === 'full' || parentDisplay === 'between') {
+                    let flagA = false;
+                    let flagB = false;
+
+                    const fA = a[edgeIndex];
+                    for (let i = offsets[fA], il = offsets[fA + 1]; i < il; ++i) {
+                        const eA = elements[members[offsets[i]]];
+                        if (!SortedArray.has(childUnit.elements, eA)) flagA = true;
+                    }
+
+                    const fB = b[edgeIndex];
+                    for (let i = offsets[fB], il = offsets[fB + 1]; i < il; ++i) {
+                        const eB = elements[members[offsets[i]]];
+                        if (!SortedArray.has(childUnit.elements, eB)) flagB = true;
+                    }
+
+                    return parentDisplay === 'full' ? flagA && flagB : flagA === flagB;
+                } else {
+                    assertUnreachable(parentDisplay);
+                }
+            }
+
+            return false;
+        }
     };
 
-    const m = createLinkCylinderMesh(ctx, builderProps, props, mesh);
+    const { mesh: m, boundingSphere } = createLinkCylinderMesh(ctx, builderProps, props, mesh);
 
-    const sphere = Sphere3D.expand(Sphere3D(), (childUnit ?? unit).boundary.sphere, 1 * sizeFactor);
-    m.setBoundingSphere(sphere);
+    if (boundingSphere) {
+        m.setBoundingSphere(boundingSphere);
+    } else if (m.triangleCount > 0) {
+        const sphere = Sphere3D.expand(Sphere3D(), (childUnit ?? unit).boundary.sphere, 1 * sizeFactor);
+        m.setBoundingSphere(sphere);
+    }
 
     return m;
 }
@@ -74,10 +157,7 @@ async function createIntraUnitInteractionsCylinderMesh(ctx: VisualContext, unit:
 export const InteractionsIntraUnitParams = {
     ...UnitsMeshParams,
     ...LinkCylinderParams,
-    sizeFactor: PD.Numeric(0.3, { min: 0, max: 10, step: 0.01 }),
-    dashCount: PD.Numeric(6, { min: 2, max: 10, step: 2 }),
-    dashScale: PD.Numeric(0.4, { min: 0, max: 2, step: 0.1 }),
-    includeParent: PD.Boolean(false),
+    ...InteractionsSharedParams,
 };
 export type InteractionsIntraUnitParams = typeof InteractionsIntraUnitParams
 
@@ -94,7 +174,10 @@ export function InteractionsIntraUnitVisual(materialId: number): UnitsVisual<Int
                 newProps.dashCount !== currentProps.dashCount ||
                 newProps.dashScale !== currentProps.dashScale ||
                 newProps.dashCap !== currentProps.dashCap ||
-                newProps.radialSegments !== currentProps.radialSegments
+                newProps.radialSegments !== currentProps.radialSegments ||
+                newProps.ignoreHydrogens !== currentProps.ignoreHydrogens ||
+                newProps.ignoreHydrogensVariant !== currentProps.ignoreHydrogensVariant ||
+                newProps.parentDisplay !== currentProps.parentDisplay
             );
 
             const interactionsHash = InteractionsProvider.get(newStructureGroup.structure).version;
@@ -122,6 +205,8 @@ function getInteractionLoci(pickingId: PickingId, structureGroup: StructureGroup
     }
     return EmptyLoci;
 }
+
+const __contactIndicesSet = new Set<number>();
 
 function eachInteraction(loci: Loci, structureGroup: StructureGroup, apply: (interval: Interval) => boolean, isMarking: boolean) {
     let changed = false;
@@ -156,21 +241,37 @@ function eachInteraction(loci: Loci, structureGroup: StructureGroup, apply: (int
 
         const { offset } = contacts;
         const { offsets: fOffsets, indices: fIndices } = features.elementsIndex;
+        const { members, offsets } = features;
 
-        // TODO: when isMarking, all elements of contact features need to be in the loci
         for (const e of loci.elements) {
             const unitIdx = group.unitIndexMap.get(e.unit.id);
-            if (unitIdx !== undefined) continue;
-            if (isMarking && OrderedSet.size(e.indices) === 1) continue;
+            if (unitIdx === undefined) continue;
 
             OrderedSet.forEach(e.indices, v => {
                 for (let i = fOffsets[v], il = fOffsets[v + 1]; i < il; ++i) {
                     const fI = fIndices[i];
                     for (let j = offset[fI], jl = offset[fI + 1]; j < jl; ++j) {
-                        if (apply(Interval.ofSingleton(unitIdx * groupCount + j))) changed = true;
+                        __contactIndicesSet.add(j);
                     }
                 }
             });
+
+            __contactIndicesSet.forEach(i => {
+                if (isMarking) {
+                    const fA = contacts.a[i];
+                    for (let j = offsets[fA], jl = offsets[fA + 1]; j < jl; ++j) {
+                        if (!OrderedSet.has(e.indices, members[j])) return;
+                    }
+                    const fB = contacts.b[i];
+                    for (let j = offsets[fB], jl = offsets[fB + 1]; j < jl; ++j) {
+                        if (!OrderedSet.has(e.indices, members[j])) return;
+                    }
+                }
+
+                if (apply(Interval.ofSingleton(unitIdx * groupCount + i))) changed = true;
+            });
+
+            __contactIndicesSet.clear();
         }
     }
     return changed;

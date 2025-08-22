@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -16,26 +16,38 @@ import { Mat4, Vec3 } from '../../../mol-math/linear-algebra';
 import { eachElement, eachSerialElement, ElementIterator, getElementLoci, getSerialElementLoci } from './util/element';
 import { Sphere3D } from '../../../mol-math/geometry';
 import { UnitsDirectVolumeParams, UnitsVisual, UnitsDirectVolumeVisual } from '../units-visual';
-import { getStructureExtraRadius, getUnitExtraRadius } from './util/common';
 
-async function createGaussianDensityVolume(ctx: VisualContext, structure: Structure, theme: Theme, props: GaussianDensityProps, directVolume?: DirectVolume): Promise<DirectVolume> {
-    const { runtime, webgl } = ctx;
-    if (!webgl || !webgl.extensions.blendMinMax) {
-        throw new Error('GaussianDensityVolume requires `webgl` and `blendMinMax` extension');
+function createGaussianDensityVolume(ctx: VisualContext, structure: Structure, theme: Theme, props: GaussianDensityProps, directVolume?: DirectVolume): DirectVolume {
+    const { webgl } = ctx;
+    if (!webgl) {
+        // gpu gaussian density also needs blendMinMax but there is no fallback here so
+        // we allow it here with the results that there is no group id assignment and
+        // hence no group-based coloring or picking
+        throw new Error('GaussianDensityVolume requires `webgl`');
     }
 
-    const oldTexture = directVolume ? directVolume.gridTexture.ref.value : undefined;
-    const densityTextureData = await computeStructureGaussianDensityTexture(structure, props, webgl, oldTexture).runInContext(runtime);
-    const { transform, texture, bbox, gridDim } = densityTextureData;
+    const axisOrder = Vec3.create(0, 1, 2);
     const stats = { min: 0, max: 1, mean: 0.04, sigma: 0.01 };
 
-    const unitToCartn = Mat4.mul(Mat4(), transform, Mat4.fromScaling(Mat4(), gridDim));
-    const cellDim = Mat4.getScaling(Vec3(), transform);
+    const create = (directVolume?: DirectVolume) => {
+        const oldTexture = directVolume ? directVolume.gridTexture.ref.value : undefined;
+        const densityTextureData = computeStructureGaussianDensityTexture(structure, theme.size, props, webgl, oldTexture);
+        const { transform, texture, bbox, gridDim } = densityTextureData;
 
-    const vol = DirectVolume.create(bbox, gridDim, transform, unitToCartn, cellDim, texture, stats, true, directVolume);
+        const unitToCartn = Mat4.mul(Mat4(), transform, Mat4.fromScaling(Mat4(), gridDim));
+        const cellDim = Mat4.getScaling(Vec3(), transform);
 
-    const sphere = Sphere3D.expand(Sphere3D(), structure.boundary.sphere, props.radiusOffset + getStructureExtraRadius(structure));
-    vol.setBoundingSphere(sphere);
+        const vol = DirectVolume.create(bbox, gridDim, transform, unitToCartn, cellDim, texture, stats, true, axisOrder, 'byte', directVolume);
+
+        const sphere = Sphere3D.expand(Sphere3D(), structure.boundary.sphere, densityTextureData.maxRadius);
+        vol.setBoundingSphere(sphere);
+        return vol;
+    };
+
+    const vol = create(directVolume);
+    vol.meta.reset = () => {
+        create(vol);
+    };
 
     return vol;
 }
@@ -44,6 +56,7 @@ export const GaussianDensityVolumeParams = {
     ...ComplexDirectVolumeParams,
     ...GaussianDensityParams,
     ignoreHydrogens: PD.Boolean(false),
+    ignoreHydrogensVariant: PD.Select('all', PD.arrayToOptions(['all', 'non-polar'] as const)),
     includeParent: PD.Boolean(false, { isHidden: true }),
 };
 export type GaussianDensityVolumeParams = typeof GaussianDensityVolumeParams
@@ -60,6 +73,7 @@ export function GaussianDensityVolumeVisual(materialId: number): ComplexVisual<G
             if (newProps.radiusOffset !== currentProps.radiusOffset) state.createGeometry = true;
             if (newProps.smoothness !== currentProps.smoothness) state.createGeometry = true;
             if (newProps.ignoreHydrogens !== currentProps.ignoreHydrogens) state.createGeometry = true;
+            if (newProps.ignoreHydrogensVariant !== currentProps.ignoreHydrogensVariant) state.createGeometry = true;
             if (newProps.traceOnly !== currentProps.traceOnly) state.createGeometry = true;
             if (newProps.includeParent !== currentProps.includeParent) state.createGeometry = true;
         },
@@ -71,8 +85,8 @@ export function GaussianDensityVolumeVisual(materialId: number): ComplexVisual<G
 
 //
 
-async function createUnitsGaussianDensityVolume(ctx: VisualContext, unit: Unit, structure: Structure, theme: Theme, props: GaussianDensityProps, directVolume?: DirectVolume): Promise<DirectVolume> {
-    const { runtime, webgl } = ctx;
+function createUnitsGaussianDensityVolume(ctx: VisualContext, unit: Unit, structure: Structure, theme: Theme, props: GaussianDensityProps, directVolume?: DirectVolume): DirectVolume {
+    const { webgl } = ctx;
     if (!webgl) {
         // gpu gaussian density also needs blendMinMax but there is no fallback here so
         // we allow it here with the results that there is no group id assignment and
@@ -80,18 +94,27 @@ async function createUnitsGaussianDensityVolume(ctx: VisualContext, unit: Unit, 
         throw new Error('GaussianDensityVolume requires `webgl`');
     }
 
-    const oldTexture = directVolume ? directVolume.gridTexture.ref.value : undefined;
-    const densityTextureData = await computeUnitGaussianDensityTexture(structure, unit, props, webgl, oldTexture).runInContext(runtime);
-    const { transform, texture, bbox, gridDim } = densityTextureData;
+    const axisOrder = Vec3.create(0, 1, 2);
     const stats = { min: 0, max: 1, mean: 0.04, sigma: 0.01 };
 
-    const unitToCartn = Mat4.mul(Mat4(), transform, Mat4.fromScaling(Mat4(), gridDim));
-    const cellDim = Mat4.getScaling(Vec3(), transform);
+    const create = (directVolume?: DirectVolume) => {
+        const oldTexture = directVolume ? directVolume.gridTexture.ref.value : undefined;
+        const densityTextureData = computeUnitGaussianDensityTexture(structure, unit, theme.size, props, webgl, oldTexture);
+        const { transform, texture, bbox, gridDim } = densityTextureData;
 
-    const vol = DirectVolume.create(bbox, gridDim, transform, unitToCartn, cellDim, texture, stats, true, directVolume);
+        const unitToCartn = Mat4.mul(Mat4(), transform, Mat4.fromScaling(Mat4(), gridDim));
+        const cellDim = Mat4.getScaling(Vec3(), transform);
+        const vol = DirectVolume.create(bbox, gridDim, transform, unitToCartn, cellDim, texture, stats, true, axisOrder, 'byte', directVolume);
 
-    const sphere = Sphere3D.expand(Sphere3D(), unit.boundary.sphere, props.radiusOffset + getUnitExtraRadius(unit));
-    vol.setBoundingSphere(sphere);
+        const sphere = Sphere3D.expand(Sphere3D(), unit.boundary.sphere, densityTextureData.maxRadius);
+        vol.setBoundingSphere(sphere);
+        return vol;
+    };
+
+    const vol = create(directVolume);
+    vol.meta.reset = () => {
+        create(vol);
+    };
 
     return vol;
 }
@@ -100,6 +123,7 @@ export const UnitsGaussianDensityVolumeParams = {
     ...UnitsDirectVolumeParams,
     ...GaussianDensityParams,
     ignoreHydrogens: PD.Boolean(false),
+    ignoreHydrogensVariant: PD.Select('all', PD.arrayToOptions(['all', 'non-polar'] as const)),
     includeParent: PD.Boolean(false, { isHidden: true }),
 };
 export type UnitsGaussianDensityVolumeParams = typeof UnitsGaussianDensityVolumeParams
@@ -116,6 +140,7 @@ export function UnitsGaussianDensityVolumeVisual(materialId: number): UnitsVisua
             if (newProps.radiusOffset !== currentProps.radiusOffset) state.createGeometry = true;
             if (newProps.smoothness !== currentProps.smoothness) state.createGeometry = true;
             if (newProps.ignoreHydrogens !== currentProps.ignoreHydrogens) state.createGeometry = true;
+            if (newProps.ignoreHydrogensVariant !== currentProps.ignoreHydrogensVariant) state.createGeometry = true;
             if (newProps.traceOnly !== currentProps.traceOnly) state.createGeometry = true;
             if (newProps.includeParent !== currentProps.includeParent) state.createGeometry = true;
         },

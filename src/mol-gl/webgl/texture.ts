@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Gianluca Tomasello <giagitom@gmail.com>
  */
 
 import { WebGLContext } from './context';
@@ -11,8 +12,10 @@ import { RenderableSchema } from '../renderable/schema';
 import { idFactory } from '../../mol-util/id-factory';
 import { Framebuffer } from './framebuffer';
 import { isWebGL2, GLRenderingContext } from './compat';
-import { ValueOf } from '../../mol-util/type-helpers';
+import { isPromiseLike, ValueOf } from '../../mol-util/type-helpers';
 import { WebGLExtensions } from './extensions';
+import { objectForEach } from '../../mol-util/object';
+import { isPowerOfTwo } from '../../mol-math/misc';
 
 const getNextTextureId = idFactory();
 
@@ -30,7 +33,7 @@ export type TextureKindValue = {
 export type TextureValueType = ValueOf<TextureKindValue>
 export type TextureKind = keyof TextureKindValue
 export type TextureType = 'ubyte' | 'ushort' | 'float' | 'fp16' | 'int'
-export type TextureFormat = 'alpha' | 'rgb' | 'rgba' | 'depth'
+export type TextureFormat = 'alpha' | 'rg' | 'rgb' | 'rgba' | 'depth'
 /** Numbers are shortcuts for color attachment */
 export type TextureAttachment = 'depth' | 'stencil' | 'color0' | 'color1' | 'color2' | 'color3' | 'color4' | 'color5' | 'color6' | 'color7' | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7
 export type TextureFilter = 'nearest' | 'linear'
@@ -56,12 +59,16 @@ export function getTarget(gl: GLRenderingContext, kind: TextureKind): number {
 export function getFormat(gl: GLRenderingContext, format: TextureFormat, type: TextureType): number {
     switch (format) {
         case 'alpha':
-            if (isWebGL2(gl) && type === 'float') return gl.RED;
+            if (isWebGL2(gl) && (type === 'float' || type === 'fp16')) return gl.RED;
             else if (isWebGL2(gl) && type === 'int') return gl.RED_INTEGER;
             else return gl.ALPHA;
         case 'rgb':
             if (isWebGL2(gl) && type === 'int') return gl.RGB_INTEGER;
             return gl.RGB;
+        case 'rg':
+            if (isWebGL2(gl) && (type === 'float' || type === 'fp16')) return gl.RG;
+            else if (isWebGL2(gl) && type === 'int') return gl.RG_INTEGER;
+            else throw new Error('texture format "rg" requires webgl2 and type "float" or int"');
         case 'rgba':
             if (isWebGL2(gl) && type === 'int') return gl.RGBA_INTEGER;
             return gl.RGBA;
@@ -78,6 +85,13 @@ export function getInternalFormat(gl: GLRenderingContext, format: TextureFormat,
                     case 'float': return gl.R32F;
                     case 'fp16': return gl.R16F;
                     case 'int': return gl.R32I;
+                }
+            case 'rg':
+                switch (type) {
+                    case 'ubyte': return gl.RG;
+                    case 'float': return gl.RG32F;
+                    case 'fp16': return gl.RG16F;
+                    case 'int': return gl.RG32I;
                 }
             case 'rgb':
                 switch (type) {
@@ -104,13 +118,17 @@ export function getInternalFormat(gl: GLRenderingContext, format: TextureFormat,
 }
 
 function getByteCount(format: TextureFormat, type: TextureType, width: number, height: number, depth: number): number {
-    const bpe = getFormatSize(format) * getTypeSize(type);
-    return bpe * width * height * (depth || 1);
+    return getBytesPerElement(format, type) * width * height * (depth || 1);
+}
+
+export function getBytesPerElement(format: TextureFormat, type: TextureType): number {
+    return getFormatSize(format) * getTypeSize(type);
 }
 
 function getFormatSize(format: TextureFormat) {
     switch (format) {
         case 'alpha': return 1;
+        case 'rg': return 2;
         case 'rgb': return 3;
         case 'rgba': return 4;
         case 'depth': return 4;
@@ -176,7 +194,7 @@ function isTexture2d(x: TextureImage<any> | TextureVolume<any>, target: number, 
     return target === gl.TEXTURE_2D;
 }
 
-function isTexture3d(x: TextureImage<any> | TextureVolume<any>, target: number, gl: WebGL2RenderingContext): x is TextureImage<any> {
+function isTexture3d(x: TextureImage<any> | TextureVolume<any>, target: number, gl: WebGL2RenderingContext): x is TextureVolume<any> {
     return target === gl.TEXTURE_3D;
 }
 
@@ -200,6 +218,7 @@ export interface Texture {
      * `define` or `load` without `sub` must have been called before.
      */
     load: (image: TextureImage<any> | TextureVolume<any> | HTMLImageElement, sub?: boolean) => void
+    mipmap: () => void
     bind: (id: TextureId) => void
     unbind: (id: TextureId) => void
     /** Use `layer` to attach a z-slice of a 3D texture */
@@ -238,6 +257,10 @@ export function createTexture(gl: GLRenderingContext, extensions: WebGLExtension
         throw new Error(`texture kind '${kind}' and type '${_type}' are incompatible`);
     }
 
+    if (!extensions.depthTexture && _format === 'depth') {
+        throw new Error(`extension 'WEBGL_depth_texture' needed for 'depth' texture format`);
+    }
+
     const target = getTarget(gl, kind);
     const filter = getFilter(gl, _filter);
     const format = getFormat(gl, _format, _type);
@@ -257,9 +280,14 @@ export function createTexture(gl: GLRenderingContext, extensions: WebGLExtension
 
     let width = 0, height = 0, depth = 0;
     let loadedData: undefined | TextureImage<any> | TextureVolume<any> | HTMLImageElement;
+    let hasMipmap = false;
     let destroyed = false;
 
     function define(_width: number, _height: number, _depth?: number) {
+        if (_width === 0 || _height === 0 || (isWebGL2(gl) && target === gl.TEXTURE_3D && _depth === 0)) {
+            throw new Error('empty textures are not allowed');
+        }
+
         if (width === _width && height === _height && depth === (_depth || 0)) return;
 
         width = _width, height = _height, depth = _depth || 0;
@@ -272,14 +300,20 @@ export function createTexture(gl: GLRenderingContext, extensions: WebGLExtension
             throw new Error('unknown texture target');
         }
     }
+    define(1, 1, isWebGL2(gl) && target === gl.TEXTURE_3D ? 1 : 0);
 
     function load(data: TextureImage<any> | TextureVolume<any> | HTMLImageElement, sub = false) {
+        if (data.width === 0 || data.height === 0 || (!isImage(data) && isWebGL2(gl) && isTexture3d(data, target, gl) && data.depth === 0)) {
+            throw new Error('empty textures are not allowed');
+        }
+
         gl.bindTexture(target, texture);
         // unpack alignment of 1 since we use textures only for data
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
         gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
         gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
         if (isImage(data)) {
+            width = data.width, height = data.height;
             gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
             gl.bindTexture(gl.TEXTURE_2D, texture);
             gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, format, type, data);
@@ -307,6 +341,22 @@ export function createTexture(gl: GLRenderingContext, extensions: WebGLExtension
         }
         gl.bindTexture(target, null);
         loadedData = data;
+    }
+
+    function mipmap() {
+        if (target !== gl.TEXTURE_2D) {
+            throw new Error('mipmap only supported for 2d textures');
+        }
+
+        if (isWebGL2(gl) || (isPowerOfTwo(width) && isPowerOfTwo(height))) {
+            gl.bindTexture(target, texture);
+            gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.generateMipmap(target);
+            gl.bindTexture(target, null);
+            hasMipmap = true;
+        } else {
+            throw new Error('mipmap unsupported for non-power-of-two textures and webgl1');
+        }
     }
 
     function attachFramebuffer(framebuffer: Framebuffer, attachment: TextureAttachment, layer?: number) {
@@ -337,6 +387,7 @@ export function createTexture(gl: GLRenderingContext, extensions: WebGLExtension
 
         define,
         load,
+        mipmap,
         bind: (id: TextureId) => {
             gl.activeTexture(gl.TEXTURE0 + id);
             gl.bindTexture(target, texture);
@@ -364,6 +415,7 @@ export function createTexture(gl: GLRenderingContext, extensions: WebGLExtension
             width = 0, height = 0, depth = 0; // set to zero to trigger resize
             define(_width, _height, _depth);
             if (loadedData) load(loadedData);
+            if (hasMipmap) mipmap();
         },
         destroy: () => {
             if (destroyed) return;
@@ -409,12 +461,154 @@ export function loadImageTexture(src: string, cell: ValueCell<Texture>, texture:
 
 //
 
+export type CubeSide = 'nx' | 'ny' | 'nz' | 'px' | 'py' | 'pz';
+
+export type CubeFaces = {
+    [k in CubeSide]: string | File | Promise<Blob>;
+}
+
+export function getCubeTarget(gl: GLRenderingContext, side: CubeSide): number {
+    switch (side) {
+        case 'nx': return gl.TEXTURE_CUBE_MAP_NEGATIVE_X;
+        case 'ny': return gl.TEXTURE_CUBE_MAP_NEGATIVE_Y;
+        case 'nz': return gl.TEXTURE_CUBE_MAP_NEGATIVE_Z;
+        case 'px': return gl.TEXTURE_CUBE_MAP_POSITIVE_X;
+        case 'py': return gl.TEXTURE_CUBE_MAP_POSITIVE_Y;
+        case 'pz': return gl.TEXTURE_CUBE_MAP_POSITIVE_Z;
+    }
+}
+
+export function createCubeTexture(gl: GLRenderingContext, faces: CubeFaces, mipmaps: boolean, onload?: (errored?: boolean) => void): Texture {
+    const target = gl.TEXTURE_CUBE_MAP;
+    const filter = gl.LINEAR;
+    const internalFormat = gl.RGBA;
+    const format = gl.RGBA;
+    const type = gl.UNSIGNED_BYTE;
+
+    let size = 0;
+
+    let texture = gl.createTexture();
+    gl.bindTexture(target, texture);
+
+    function load(cubeTarget: number, level: number, image: HTMLImageElement, isReset: boolean) {
+        if (size === 0) size = image.width;
+
+        gl.bindTexture(target, texture);
+        gl.texImage2D(cubeTarget, level, internalFormat, size, size, 0, format, type, null);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+        gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.bindTexture(target, texture);
+        gl.texImage2D(cubeTarget, level, internalFormat, format, type, image);
+
+        loadedCount += 1;
+        if (loadedCount === 6) {
+            if (!destroyed) {
+                if (mipmaps) {
+                    gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+                    gl.generateMipmap(target);
+                } else {
+                    gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filter);
+                }
+                gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);
+            }
+            if (!isReset) onload?.(destroyed);
+        }
+    }
+
+    const facesData: { cubeTarget: number, level: number, image: HTMLImageElement }[] = [];
+
+    let loadedCount = 0;
+    objectForEach(faces, (source, side) => {
+        if (!source) return;
+
+        const level = 0;
+        const cubeTarget = getCubeTarget(gl, side as CubeSide);
+
+        const image = new Image();
+        if (source instanceof File) {
+            image.src = URL.createObjectURL(source);
+        } else if (isPromiseLike(source)) {
+            source.then(blob => {
+                image.src = URL.createObjectURL(blob);
+            });
+        } else {
+            image.src = source;
+        }
+
+        facesData.push({ cubeTarget, level, image });
+
+        image.addEventListener('load', () => {
+            load(cubeTarget, level, image, false);
+        });
+        image.addEventListener('error', () => {
+            onload?.(true);
+        });
+    });
+
+    let destroyed = false;
+
+    return {
+        id: getNextTextureId(),
+        target,
+        format,
+        internalFormat,
+        type,
+        filter,
+
+        getWidth: () => size,
+        getHeight: () => size,
+        getDepth: () => 0,
+        getByteCount: () => {
+            return getByteCount('rgba', 'ubyte', size, size, 0) * 6 * (mipmaps ? 2 : 1);
+        },
+
+        define: () => {},
+        load: () => {},
+        mipmap: () => {},
+        bind: (id: TextureId) => {
+            gl.activeTexture(gl.TEXTURE0 + id);
+            gl.bindTexture(target, texture);
+        },
+        unbind: (id: TextureId) => {
+            gl.activeTexture(gl.TEXTURE0 + id);
+            gl.bindTexture(target, null);
+        },
+        attachFramebuffer: () => {},
+        detachFramebuffer: () => {},
+
+        reset: () => {
+            texture = getTexture(gl);
+            gl.bindTexture(target, texture);
+
+            loadedCount = 0;
+            for (const { cubeTarget, level, image } of facesData) {
+                load(cubeTarget, level, image, true);
+            }
+        },
+        destroy: () => {
+            if (destroyed) return;
+            gl.deleteTexture(texture);
+            destroyed = true;
+        },
+    };
+}
+
+//
+
+const NullTextureFormat = -1;
+
+export function isNullTexture(texture: Texture) {
+    return texture.format === NullTextureFormat;
+}
+
 export function createNullTexture(gl?: GLRenderingContext): Texture {
     const target = gl?.TEXTURE_2D ?? 3553;
     return {
         id: getNextTextureId(),
         target,
-        format: 0,
+        format: NullTextureFormat,
         internalFormat: 0,
         type: 0,
         filter: 0,
@@ -426,6 +620,7 @@ export function createNullTexture(gl?: GLRenderingContext): Texture {
 
         define: () => {},
         load: () => {},
+        mipmap: () => {},
         bind: (id: TextureId) => {
             if (gl) {
                 gl.activeTexture(gl.TEXTURE0 + id);
@@ -438,8 +633,12 @@ export function createNullTexture(gl?: GLRenderingContext): Texture {
                 gl.bindTexture(target, null);
             }
         },
-        attachFramebuffer: () => {},
-        detachFramebuffer: () => {},
+        attachFramebuffer: () => {
+            throw new Error('cannot attach null-texture to a framebuffer');
+        },
+        detachFramebuffer: () => {
+            throw new Error('cannot detach null-texture from a framebuffer');
+        },
 
         reset: () => {},
         destroy: () => {},

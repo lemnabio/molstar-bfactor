@@ -11,7 +11,8 @@ import { Representation } from '../../mol-repr/representation';
 import { MarkerAction } from '../../mol-util/marker-action';
 import { arrayRemoveAtInPlace } from '../../mol-util/array';
 
-export type LociLabel = JSX.Element | string
+// any represents React element. For compatibility to including the type
+export type LociLabel = string | any
 export type LociLabelProvider = {
     label: (loci: Loci, repr?: Representation<any>) => LociLabel | undefined
     group?: (entry: LociLabel) => string
@@ -41,7 +42,7 @@ export class LociLabelManager {
         this.showLabels();
     }
 
-    private locis: Representation.Loci[] = []
+    private locis: Representation.Loci[] = [];
 
     private mark(loci: Representation.Loci, action: MarkerAction) {
         const idx = this.locis.findIndex(l => Representation.Loci.areEqual(loci, l));
@@ -54,9 +55,9 @@ export class LociLabelManager {
         }
     }
 
-    private isDirty = false
-    private labels: LociLabel[] = []
-    private groupedLabels = new Map<string, LociLabel[]>()
+    private isDirty = false;
+    private labels: LociLabel[] = [];
+    private groupedLabels = new Map<string, LociLabel[]>();
 
     private showLabels() {
         this.ctx.behaviors.labels.highlight.next({ labels: this.getLabels() });
@@ -93,6 +94,8 @@ export class LociLabelManager {
 
     constructor(public ctx: PluginContext) {
         ctx.managers.interactivity.lociHighlights.addProvider((loci, action, noRender) => {
+            if (this.providers.length === 0) return;
+
             this.mark(loci, action);
             if (!noRender) this.showLabels();
         });

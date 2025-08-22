@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2022 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -85,7 +85,7 @@ namespace InteractionsIntraContacts {
 
 export { InteractionsInterContacts };
 class InteractionsInterContacts extends InterUnitGraph<number, Features.FeatureIndex, InteractionsInterContacts.Props> {
-    private readonly elementKeyIndex: Map<string, number[]>
+    private readonly elementKeyIndex: Map<string, number[]>;
 
     getContactIndicesForElement(index: StructureElement.UnitIndex, unit: Unit): ReadonlyArray<number> {
         return this.elementKeyIndex.get(this.getElementKey(index, unit.id)) || [];
@@ -98,41 +98,32 @@ class InteractionsInterContacts extends InterUnitGraph<number, Features.FeatureI
     constructor(map: Map<number, InterUnitGraph.UnitPairEdges<number, Features.FeatureIndex, InteractionsInterContacts.Props>[]>, unitsFeatures: IntMap<Features>) {
         super(map);
 
-        let count = 0;
-        const elementKeyIndex = new Map<string, number[]>();
-
-        const add = (index: StructureElement.UnitIndex, unitId: number) => {
-            const vertexKey = this.getElementKey(index, unitId);
-            const e = elementKeyIndex.get(vertexKey);
-            if (e === undefined) elementKeyIndex.set(vertexKey, [count]);
-            else e.push(count);
-        };
-
-        this.map.forEach(pairEdgesArray => {
-            pairEdgesArray.forEach(({ unitA, connectedIndices }) => {
-                connectedIndices.forEach(indexA => {
-                    const { offsets: offsetsA, members: membersA } = unitsFeatures.get(unitA);
-                    for (let j = offsetsA[indexA], jl = offsetsA[indexA + 1]; j < jl; ++j) {
-                        add(membersA[j], unitA);
-                    }
-                    count += 1;
-                });
-            });
-        });
-
-        this.elementKeyIndex = elementKeyIndex;
+        this.elementKeyIndex = new Map<string, number[]>();
+        for (let i = 0, il = this.edges.length; i < il; ++i) {
+            const { unitA, indexA } = this.edges[i];
+            const { offsets, members } = unitsFeatures.get(unitA);
+            for (let j = offsets[indexA], jl = offsets[indexA + 1]; j < jl; ++j) {
+                const vertexKey = this.getElementKey(members[j], unitA);
+                const e = this.elementKeyIndex.get(vertexKey);
+                if (e === undefined) {
+                    this.elementKeyIndex.set(vertexKey, [i]);
+                } else {
+                    e.push(i);
+                }
+            }
+        }
     }
 }
 namespace InteractionsInterContacts {
     export type Props = { type: InteractionType, flag: InteractionFlag }
 }
 
-export const enum InteractionFlag {
+export enum InteractionFlag {
     None = 0,
     Filtered = 1,
 }
 
-export const enum InteractionType {
+export enum InteractionType {
     Unknown = 0,
     Ionic = 1,
     CationPi = 2,
@@ -184,6 +175,24 @@ export const enum FeatureType {
     IonicTypeMetal = 13
 }
 
+// to use with isolatedModules
+export enum FeatureTypes {
+    None = FeatureType.None,
+    PositiveCharge = FeatureType.PositiveCharge,
+    NegativeCharge = FeatureType.NegativeCharge,
+    AromaticRing = FeatureType.AromaticRing,
+    HydrogenDonor = FeatureType.HydrogenDonor,
+    HydrogenAcceptor = FeatureType.HydrogenAcceptor,
+    HalogenDonor = FeatureType.HalogenDonor,
+    HalogenAcceptor = FeatureType.HalogenAcceptor,
+    HydrophobicAtom = FeatureType.HydrophobicAtom,
+    WeakHydrogenDonor = FeatureType.WeakHydrogenDonor,
+    IonicTypePartner = FeatureType.IonicTypePartner,
+    DativeBondPartner = FeatureType.DativeBondPartner,
+    TransitionMetal = FeatureType.TransitionMetal,
+    IonicTypeMetal = FeatureType.IonicTypeMetal
+}
+
 export function featureTypeLabel(type: FeatureType): string {
     switch (type) {
         case FeatureType.None:
@@ -217,7 +226,7 @@ export function featureTypeLabel(type: FeatureType): string {
     }
 }
 
-export const enum FeatureGroup {
+export enum FeatureGroup {
     None = 0,
     QuaternaryAmine = 1,
     TertiaryAmine = 2,

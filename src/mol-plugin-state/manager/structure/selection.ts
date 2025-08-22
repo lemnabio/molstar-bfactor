@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Adam Midlik <midlik@gmail.com>
  */
 
 import { OrderedSet } from '../../../mol-data/int';
@@ -12,7 +13,7 @@ import { PrincipalAxes } from '../../../mol-math/linear-algebra/matrix/principal
 import { EmptyLoci, Loci } from '../../../mol-model/loci';
 import { QueryContext, Structure, StructureElement, StructureQuery, StructureSelection } from '../../../mol-model/structure';
 import { PluginContext } from '../../../mol-plugin/context';
-import { StateObjectRef } from '../../../mol-state';
+import { StateObjectRef, StateSelection } from '../../../mol-state';
 import { Task } from '../../../mol-task';
 import { structureElementStatsLabel } from '../../../mol-theme/label';
 import { arrayRemoveAtInPlace } from '../../../mol-util/array';
@@ -22,6 +23,7 @@ import { PluginStateObject as PSO } from '../../objects';
 import { UUID } from '../../../mol-util';
 import { StructureRef } from './hierarchy-state';
 import { Boundary } from '../../../mol-math/geometry/boundary';
+import { iterableToArray } from '../../../mol-data/util';
 
 interface StructureSelectionManagerState {
     entries: Map<string, SelectionEntry>,
@@ -34,6 +36,13 @@ const HISTORY_CAPACITY = 24;
 
 export type StructureSelectionModifier = 'add' | 'remove' | 'intersect' | 'set'
 
+export type StructureSelectionSnapshot = {
+    entries: {
+        ref: string
+        bundle: StructureElement.Bundle
+    }[]
+}
+
 export class StructureSelectionManager extends StatefulPluginComponent<StructureSelectionManagerState> {
     readonly events = {
         changed: this.ev<undefined>(),
@@ -44,9 +53,9 @@ export class StructureSelectionManager extends StatefulPluginComponent<Structure
             remove: this.ev<StructureElement.Loci>(),
             clear: this.ev<undefined>()
         }
-    }
+    };
 
-    private referenceLoci: StructureElement.Loci | undefined
+    private referenceLoci: StructureElement.Loci | undefined;
 
     get entries() { return this.state.entries; }
     get additionsHistory() { return this.state.additionsHistory; }
@@ -244,7 +253,6 @@ export class StructureSelectionManager extends StatefulPluginComponent<Structure
     }
 
     private onUpdate(ref: string, oldObj: PSO.Molecule.Structure | undefined, obj: PSO.Molecule.Structure) {
-
         // no change to structure
         if (oldObj === obj || oldObj?.data === obj.data) return;
 
@@ -252,7 +260,9 @@ export class StructureSelectionManager extends StatefulPluginComponent<Structure
         const cell = this.plugin.helpers.substructureParent.get(obj.data, true);
         if (!cell) return;
 
-        ref = cell.transform.ref;
+        // only need to update the root
+        if (ref !== cell.transform.ref) return;
+
         if (!this.entries.has(ref)) return;
 
         // use structure from last decorator as reference
@@ -342,28 +352,9 @@ export class StructureSelectionManager extends StatefulPluginComponent<Structure
 
     tryGetRange(loci: Loci): StructureElement.Loci | undefined {
         if (!StructureElement.Loci.is(loci)) return;
-        if (loci.elements.length !== 1) return;
-        const entry = this.getEntry(loci.structure);
-        if (!entry) return;
+        if (!this.getEntry(loci.structure)) return;
 
-        const xs = loci.elements[0];
-        if (!xs) return;
-
-        const ref = this.referenceLoci;
-        if (!ref || !StructureElement.Loci.is(ref) || ref.structure !== loci.structure) return;
-
-        let e: StructureElement.Loci['elements'][0] | undefined;
-        for (const _e of ref.elements) {
-            if (xs.unit === _e.unit) {
-                e = _e;
-                break;
-            }
-        }
-        if (!e) return;
-
-        if (xs.unit !== e.unit) return;
-
-        return getElementRange(loci.structure, e, xs);
+        return getLociRange(this.referenceLoci, loci);
     }
 
     /** Count of all selected elements */
@@ -405,14 +396,8 @@ export class StructureSelectionManager extends StatefulPluginComponent<Structure
     }
 
     getPrincipalAxes(): PrincipalAxes {
-        const elementCount = this.elementCount();
-        const positions = new Float32Array(3 * elementCount);
-        let offset = 0;
-        this.entries.forEach(v => {
-            StructureElement.Loci.toPositionsArray(v.selection, positions, offset);
-            offset += StructureElement.Loci.size(v.selection) * 3;
-        });
-        return PrincipalAxes.ofPositions(positions);
+        const values = iterableToArray(this.entries.values());
+        return StructureElement.Loci.getPrincipalAxesMany(values.map(v => v.selection));
     }
 
     modify(modifier: StructureSelectionModifier, loci: Loci) {
@@ -488,6 +473,31 @@ export class StructureSelectionManager extends StatefulPluginComponent<Structure
         }
     }
 
+    getSnapshot(): StructureSelectionSnapshot {
+        const entries: StructureSelectionSnapshot['entries'] = [];
+
+        this.entries.forEach((entry, ref) => {
+            entries.push({
+                ref,
+                bundle: StructureElement.Bundle.fromLoci(entry.selection)
+            });
+        });
+
+        return { entries };
+    }
+
+    setSnapshot(snapshot: StructureSelectionSnapshot) {
+        this.entries.clear();
+
+        for (const { ref, bundle } of snapshot.entries) {
+            const structure = this.plugin.state.data.select(StateSelection.Generators.byRef(ref))[0]?.obj?.data as Structure;
+            if (!structure) continue;
+
+            const loci = StructureElement.Bundle.toLoci(bundle, structure);
+            this.fromLoci('set', loci, false);
+        }
+    }
+
     constructor(private plugin: PluginContext) {
         super({ entries: new Map(), additionsHistory: [], stats: SelectionStats() });
 
@@ -539,6 +549,31 @@ export interface StructureSelectionHistoryEntry {
 /** remap `selection-entry` to be related to `structure` if possible */
 function remapSelectionEntry(e: SelectionEntry, s: Structure): SelectionEntry {
     return new SelectionEntry(StructureElement.Loci.remap(e.selection, s));
+}
+
+/** Return loci spanning the range between `fromLoci` and `toLoci` (including both) if they belong to the same unit in the same structure */
+export function getLociRange(fromLoci: Loci | undefined, toLoci: Loci | undefined): StructureElement.Loci | undefined {
+    if (!StructureElement.Loci.is(fromLoci)) return;
+    if (!StructureElement.Loci.is(toLoci)) return;
+    if (fromLoci.structure !== toLoci.structure) return;
+
+    if (toLoci.elements.length !== 1) return;
+
+    const xs = toLoci.elements[0];
+    if (!xs) return;
+
+    let e: StructureElement.Loci['elements'][0] | undefined;
+    for (const _e of fromLoci.elements) {
+        if (xs.unit === _e.unit) {
+            e = _e;
+            break;
+        }
+    }
+    if (!e) return;
+
+    if (xs.unit !== e.unit) return;
+
+    return getElementRange(toLoci.structure, e, xs);
 }
 
 /**

@@ -1,20 +1,31 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Adam Midlik <midlik@gmail.com>
  */
 
 import { ElementSymbol } from '../../mol-model/structure/model/types';
 import { Color, ColorMap } from '../../mol-util/color';
 import { StructureElement, Unit, Bond } from '../../mol-model/structure';
 import { Location } from '../../mol-model/location';
-import { ColorTheme } from '../color';
+import type { ColorTheme } from '../color';
 import { ParamDefinition as PD } from '../../mol-util/param-definition';
 import { ThemeDataContext } from '../theme';
 import { TableLegend } from '../../mol-util/legend';
 import { getAdjustedColorMap } from '../../mol-util/color/color';
+import { getColorMapParams } from '../../mol-util/color/params';
 import { ChainIdColorTheme, ChainIdColorThemeParams } from './chain-id';
 import { OperatorNameColorThemeParams, OperatorNameColorTheme } from './operator-name';
+import { EntityIdColorTheme, EntityIdColorThemeParams } from './entity-id';
+import { assertUnreachable } from '../../mol-util/type-helpers';
+import { EntitySourceColorTheme, EntitySourceColorThemeParams } from './entity-source';
+import { ModelIndexColorTheme, ModelIndexColorThemeParams } from './model-index';
+import { StructureIndexColorTheme, StructureIndexColorThemeParams } from './structure-index';
+import { ColorThemeCategory } from './categories';
+import { UnitIndexColorTheme, UnitIndexColorThemeParams } from './unit-index';
+import { UniformColorTheme, UniformColorThemeParams } from './uniform';
+import { TrajectoryIndexColorTheme, TrajectoryIndexColorThemeParams } from './trajectory-index';
 
 // from Jmol http://jmol.sourceforge.net/jscolors/ (or 0xFFFFFF)
 export const ElementSymbolColors = ColorMap({
@@ -25,35 +36,60 @@ export type ElementSymbolColors = typeof ElementSymbolColors
 const DefaultElementSymbolColor = Color(0xFFFFFF);
 const Description = 'Assigns a color to every atom according to its chemical element.';
 
-// TODO generalise `carbonColor` param to all themes?
-
 export const ElementSymbolColorThemeParams = {
     carbonColor: PD.MappedStatic('chain-id', {
-        'chain-id': PD.Group({ ...ChainIdColorThemeParams }),
-        'operator-name': PD.Group({ ...OperatorNameColorThemeParams }),
-        'element-symbol': PD.Group({})
+        'chain-id': PD.Group(ChainIdColorThemeParams),
+        'unit-index': PD.Group(UnitIndexColorThemeParams, { label: 'Chain Instance' }),
+        'entity-id': PD.Group(EntityIdColorThemeParams),
+        'entity-source': PD.Group(EntitySourceColorThemeParams),
+        'operator-name': PD.Group(OperatorNameColorThemeParams),
+        'model-index': PD.Group(ModelIndexColorThemeParams),
+        'structure-index': PD.Group(StructureIndexColorThemeParams),
+        'trajectory-index': PD.Group(TrajectoryIndexColorThemeParams),
+        'uniform': PD.Group(UniformColorThemeParams),
+        'element-symbol': PD.EmptyGroup(),
     }, { description: 'Use chain-id coloring for carbon atoms.' }),
     saturation: PD.Numeric(0, { min: -6, max: 6, step: 0.1 }),
-    lightness: PD.Numeric(0.2, { min: -6, max: 6, step: 0.1 })
+    lightness: PD.Numeric(0.2, { min: -6, max: 6, step: 0.1 }),
+    colors: PD.MappedStatic('default', {
+        'default': PD.EmptyGroup(),
+        'custom': PD.Group(getColorMapParams(ElementSymbolColors))
+    })
 };
 export type ElementSymbolColorThemeParams = typeof ElementSymbolColorThemeParams
 export function getElementSymbolColorThemeParams(ctx: ThemeDataContext) {
-    return ElementSymbolColorThemeParams; // TODO return copy
+    return PD.clone(ElementSymbolColorThemeParams);
 }
+
+type ElementSymbolColorThemeProps = PD.Values<ElementSymbolColorThemeParams>
 
 export function elementSymbolColor(colorMap: ElementSymbolColors, element: ElementSymbol): Color {
     const c = colorMap[element as keyof ElementSymbolColors];
     return c === undefined ? DefaultElementSymbolColor : c;
 }
 
-export function ElementSymbolColorTheme(ctx: ThemeDataContext, props: PD.Values<ElementSymbolColorThemeParams>): ColorTheme<ElementSymbolColorThemeParams> {
-    const colorMap = getAdjustedColorMap(ElementSymbolColors, props.saturation, props.lightness);
+function getCarbonTheme(ctx: ThemeDataContext, props: ElementSymbolColorThemeProps['carbonColor']) {
+    switch (props.name) {
+        case 'chain-id': return ChainIdColorTheme(ctx, props.params);
+        case 'unit-index': return UnitIndexColorTheme(ctx, props.params);
+        case 'entity-id': return EntityIdColorTheme(ctx, props.params);
+        case 'entity-source': return EntitySourceColorTheme(ctx, props.params);
+        case 'operator-name': return OperatorNameColorTheme(ctx, props.params);
+        case 'model-index': return ModelIndexColorTheme(ctx, props.params);
+        case 'structure-index': return StructureIndexColorTheme(ctx, props.params);
+        case 'trajectory-index': return TrajectoryIndexColorTheme(ctx, props.params);
+        case 'uniform': return UniformColorTheme(ctx, props.params);
+        case 'element-symbol': return undefined;
+        default: assertUnreachable(props);
+    }
+}
 
-    const carbonColor = props.carbonColor.name === 'chain-id'
-        ? ChainIdColorTheme(ctx, props.carbonColor.params).color
-        : props.carbonColor.name === 'operator-name'
-            ? OperatorNameColorTheme(ctx, props.carbonColor.params).color
-            : undefined;
+export function ElementSymbolColorTheme(ctx: ThemeDataContext, props: PD.Values<ElementSymbolColorThemeParams>): ColorTheme<ElementSymbolColorThemeParams> {
+    const colorMap = getAdjustedColorMap(props.colors.name === 'default' ? ElementSymbolColors : props.colors.params, props.saturation, props.lightness);
+
+    const carbonTheme = getCarbonTheme(ctx, props.carbonColor);
+    const carbonColor = carbonTheme?.color;
+    const contextHash = carbonTheme?.contextHash ?? -1;
 
     function elementColor(element: ElementSymbol, location: Location) {
         return (carbonColor && element === 'C')
@@ -77,7 +113,7 @@ export function ElementSymbolColorTheme(ctx: ThemeDataContext, props: PD.Values<
         return DefaultElementSymbolColor;
     }
 
-    const granularity = props.carbonColor.name === 'operator-name' ? 'groupInstance' : 'group';
+    const granularity = (props.carbonColor.name === 'operator-name' || props.carbonColor.name === 'unit-index') ? 'groupInstance' : 'group';
 
     return {
         factory: ElementSymbolColorTheme,
@@ -85,9 +121,10 @@ export function ElementSymbolColorTheme(ctx: ThemeDataContext, props: PD.Values<
         preferSmoothing: true,
         color,
         props,
+        contextHash,
         description: Description,
-        legend: TableLegend(Object.keys(ElementSymbolColors).map(name => {
-            return [name, (ElementSymbolColors as any)[name] as Color] as [string, Color];
+        legend: TableLegend(Object.keys(colorMap).map(name => {
+            return [name, (colorMap as any)[name] as Color] as [string, Color];
         }))
     };
 }
@@ -95,7 +132,7 @@ export function ElementSymbolColorTheme(ctx: ThemeDataContext, props: PD.Values<
 export const ElementSymbolColorThemeProvider: ColorTheme.Provider<ElementSymbolColorThemeParams, 'element-symbol'> = {
     name: 'element-symbol',
     label: 'Element Symbol',
-    category: ColorTheme.Category.Atom,
+    category: ColorThemeCategory.Atom,
     factory: ElementSymbolColorTheme,
     getParams: getElementSymbolColorThemeParams,
     defaultValues: PD.getDefaultValues(ElementSymbolColorThemeParams),

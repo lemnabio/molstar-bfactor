@@ -1,3 +1,18 @@
+# 0.9.12
+* add `health-check` endpoint + `healthCheckPath` config prop to report service health
+
+# 0.9.11
+# SDF/MOL2 ligand export: fix atom indices when additional atoms are present
+
+# 0.9.10
+* /ligand queries: fix atom count reported by SDF/MOL/MOL2 export
+
+# 0.9.9
+* /ligand queries: fix behavior for alternate locations
+* /ligand queries: handle additional atoms more gracefully
+* /ligand queries: better error message for UNL
+* /ligand queries: treat deuterium/tritium as hydrogen
+
 # 0.9.8
 * fix support for chem_comp_bond and struct_conn categories
 

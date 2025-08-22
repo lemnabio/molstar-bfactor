@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -29,7 +29,7 @@ class UnitRings {
         readonly ringComponentIndex: ReadonlyArray<UnitRings.ComponentIndex>,
         readonly ringComponents: ReadonlyArray<ReadonlyArray<UnitRings.Index>>
     };
-    private _aromaticRings?: ReadonlyArray<UnitRings.Index>
+    private _aromaticRings?: ReadonlyArray<UnitRings.Index>;
 
     private get index() {
         if (this._index) return this._index;
@@ -122,6 +122,9 @@ namespace UnitRing {
         }
         if (aromaticBondCount === 2 * ring.length) return true;
         if (!hasAromaticRingElement) return false;
+        if (ring.length < 5) return false;
+        // no planarity-based aromaticity if any aromatic flags are present
+        if (aromaticBondCount > 0) return false;
 
         const ma = PrincipalAxes.calculateMomentsAxes(getPositions(unit, ring));
         return Vec3.magnitude(ma.dirC) < AromaticRingPlanarityThreshold;
@@ -148,6 +151,9 @@ namespace UnitRings {
     export type ComponentIndex = { readonly '@type': 'unit-ring-component-index' } & number
 
     export function create(unit: Unit.Atomic): UnitRings {
+        if (Unit.Traits.is(unit.traits, Unit.Trait.Water) || Unit.Traits.is(unit.traits, Unit.Trait.CoarseGrained)) {
+            return new UnitRings([], unit);
+        }
         const rings = computeRings(unit);
         return new UnitRings(rings, unit);
     }

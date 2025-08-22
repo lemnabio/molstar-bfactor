@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2018 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Adam Midlik <midlik@gmail.com>
  */
 
 import { StateTree } from '../tree/immutable';
@@ -10,7 +11,7 @@ import { StateObject, StateObjectCell, StateObjectSelector, StateObjectRef } fro
 import { StateTransform } from '../transform';
 import { StateTransformer } from '../transformer';
 import { State } from '../state';
-import { produce } from 'immer';
+import { produce } from '../../mol-util/produce';
 
 export { StateBuilder };
 
@@ -40,9 +41,34 @@ namespace StateBuilder {
         | { kind: 'delete', ref: string }
         | { kind: 'insert', ref: string, transform: StateTransform }
 
-    function buildTree(state: BuildState) {
+    function getAffectedRefs(state: BuildState): string[] {
+        const refs = new Set<string>();
+        for (const a of state.actions) {
+            switch (a.kind) {
+                case 'add': refs.add(a.transform.ref); break;
+                case 'update': refs.add(a.ref); break;
+                case 'delete': refs.add(a.ref); break;
+                case 'insert': {
+                    refs.add(a.ref);
+                    refs.add(a.transform.ref);
+                    const children = state.tree.children.get(a.ref).toArray();
+                    for (const c of children) {
+                        refs.add(c);
+                    }
+                    break;
+                }
+            }
+        }
+        return Array.from(refs);
+    }
+
+    function buildTree(state: BuildState, options?: { useHashVersion?: boolean }) {
         if (!state.state || state.state.tree === state.editInfo.sourceTree) {
-            return state.tree.asImmutable();
+            const ret = state.tree.asImmutable();
+            if (options?.useHashVersion) {
+                StateTree.setParamHashVersion(ret, getAffectedRefs(state));
+            }
+            return ret;
         }
 
         // The tree has changed in the meantime, we need to reapply the changes!
@@ -63,7 +89,11 @@ namespace StateBuilder {
             }
         }
         state.editInfo.sourceTree = state.tree;
-        return tree.asImmutable();
+        const ret = tree.asImmutable();
+        if (options?.useHashVersion) {
+            StateTree.setParamHashVersion(ret, getAffectedRefs(state));
+        }
+        return ret;
     }
 
     export function is(obj: any): obj is StateBuilder {
@@ -102,7 +132,7 @@ namespace StateBuilder {
             this.state.actions.push({ kind: 'delete', ref });
             return this;
         }
-        getTree(): StateTree { return buildTree(this.state); }
+        getTree(options?: { useHashVersion?: boolean }): StateTree { return buildTree(this.state, options); }
 
         commit(options?: Partial<State.UpdateOptions>) {
             if (!this.state.state) throw new Error('Cannot commit template tree');
@@ -175,12 +205,12 @@ namespace StateBuilder {
                 const tr = this.state.tree.transforms.get(child.value);
                 if (tr && StateTransform.hasTags(tr, tags)) {
                     const to = this.to<StateTransformer.To<T>, T>(child.value);
-                    to.updateTagged(params, tagsUnion(tr.tags, tags, options && options.tags));
+                    to.updateTagged(params, stringArrayUnion(tr.tags, tags, options && options.tags));
                     return to;
                 }
             }
 
-            const t = tr.apply(applyRoot, params, { ...options, tags: tagsUnion(tags, options && options.tags) });
+            const t = tr.apply(applyRoot, params, { ...options, tags: stringArrayUnion(tags, options && options.tags) });
             this.state.tree.add(t);
             this.editInfo.count++;
             this.editInfo.lastUpdate = t.ref;
@@ -250,6 +280,35 @@ namespace StateBuilder {
             return this.root;
         }
 
+        updateState(state: Partial<StateTransform.State>) {
+            const transform = this.state.tree.transforms.get(this.ref)!;
+            if (StateTransform.isStateChange(transform.state, state)) {
+                this.state.tree.assignState(this.ref, state);
+                this.editInfo.count++;
+                this.editInfo.lastUpdate = this.ref;
+                if (!this.state.actions.find(a => a.kind === 'update' && a.ref === this.ref)) {
+                    this.state.actions.push({ kind: 'update', ref: this.ref, params: transform.params });
+                }
+            }
+        }
+
+        /** Add tags to the current node */
+        tag(tags: string | string[]) {
+            const transform = this.state.tree.transforms.get(this.ref)!;
+            this.updateTagged(transform.params, stringArrayUnion(transform.tags, tags));
+            return this;
+        }
+
+        /** Add dependsOn to the current node */
+        dependsOn(dependsOn: string | string[]) {
+            const transform = this.state.tree.transforms.get(this.ref)!;
+            if (this.state.tree.setDependsOn(this.ref, stringArrayUnion(transform.dependsOn, dependsOn))) {
+                this.editInfo.count++;
+                this.editInfo.lastUpdate = this.ref;
+                this.state.actions.push({ kind: 'update', ref: this.ref, params: transform.params });
+            }
+        }
+
         to<A extends StateObject, T extends StateTransformer>(ref: StateTransform.Ref): To<A, T>
         to<C extends StateObjectCell>(cell: C): To<StateObjectCell.Obj<C>, StateObjectCell.Transformer<C>>
         to<S extends StateObjectSelector>(selector: S): To<StateObjectSelector.Obj<S>, StateObjectSelector.Transformer<S>>
@@ -257,7 +316,7 @@ namespace StateBuilder {
         toRoot<A extends StateObject>() { return this.root.toRoot<A>(); }
         delete(ref: StateObjectRef) { return this.root.delete(ref); }
 
-        getTree(): StateTree { return buildTree(this.state); }
+        getTree(options?: { useHashVersion?: boolean }): StateTree { return buildTree(this.state, options); }
 
         /** Returns selector to this node. */
         commit(options?: Partial<State.UpdateOptions>): Promise<StateObjectSelector<A>> {
@@ -274,7 +333,7 @@ namespace StateBuilder {
     }
 }
 
-function tagsUnion(...arrays: (string[] | string | undefined)[]): string[] | undefined {
+function stringArrayUnion(...arrays: (string[] | string | undefined)[]): string[] | undefined {
     let set: Set<string> | undefined = void 0;
     const ret = [];
     for (const xs of arrays) {

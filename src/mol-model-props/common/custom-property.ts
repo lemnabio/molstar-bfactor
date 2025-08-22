@@ -10,6 +10,7 @@ import { ParamDefinition as PD } from '../../mol-util/param-definition';
 import { ValueBox } from '../../mol-util';
 import { OrderedMap } from 'immutable';
 import { AssetManager, Asset } from '../../mol-util/assets';
+import { ErrorContext } from '../../mol-util/error-context';
 
 export { CustomProperty };
 
@@ -17,6 +18,7 @@ namespace CustomProperty {
     export interface Context {
         runtime: RuntimeContext
         assetManager: AssetManager
+        errorContext?: ErrorContext
     }
 
     export type Data<V> = { value: V, assets?: Asset.Wrapper[] }
@@ -42,8 +44,8 @@ namespace CustomProperty {
     }
 
     export class Registry<Data> {
-        private providers = OrderedMap<string, Provider<Data, any, any>>().asMutable()
-        private defaultAutoAttachValues = new Map<string, boolean>()
+        private providers = OrderedMap<string, Provider<Data, any, any>>().asMutable();
+        private defaultAutoAttachValues = new Map<string, boolean>();
 
         /** Get params for all applicable property providers */
         getParams(data?: Data) {

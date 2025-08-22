@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author David Sehnal <david.sehnal@gmail.com>
  */
 
 import { ParamDefinition as PD } from '../mol-util/param-definition';
@@ -18,11 +19,16 @@ import { Loci as ModelLoci, EmptyLoci, isEmptyLoci } from '../mol-model/loci';
 import { Overpaint } from '../mol-theme/overpaint';
 import { Transparency } from '../mol-theme/transparency';
 import { Mat4 } from '../mol-math/linear-algebra';
-import { getQualityProps } from './util';
+import { LocationCallback, getQualityProps } from './util';
 import { BaseGeometry } from '../mol-geo/geometry/base';
 import { Visual } from './visual';
 import { CustomProperty } from '../mol-model-props/common/custom-property';
 import { Clipping } from '../mol-theme/clipping';
+import { SetUtils } from '../mol-util/set';
+import { cantorPairing } from '../mol-data/util';
+import { Substance } from '../mol-theme/substance';
+import { Emissive } from '../mol-theme/emissive';
+import { Location } from '../mol-model/location';
 
 export type RepresentationProps = { [k: string]: any }
 
@@ -53,24 +59,29 @@ export interface RepresentationProvider<D = any, P extends PD.Params = any, S ex
     }
     readonly getData?: (data: D, props: PD.Values<P>) => D
     readonly mustRecreate?: (oldProps: PD.Values<P>, newProps: PD.Values<P>) => boolean
+    readonly locationKinds?: ReadonlyArray<Location['kind']>
 }
 
 export namespace RepresentationProvider {
     export type ParamValues<R extends RepresentationProvider<any, any, any>> = R extends RepresentationProvider<any, infer P, any> ? PD.Values<P> : never;
 
-    export function getDetaultParams<R extends RepresentationProvider<D, any, any>, D>(r: R, ctx: ThemeRegistryContext, data: D) {
+    export function getDefaultParams<R extends RepresentationProvider<D, any, any>, D>(r: R, ctx: ThemeRegistryContext, data: D) {
         return PD.getDefaultValues(r.getParams(ctx, data));
     }
 }
 
 export type AnyRepresentationProvider = RepresentationProvider<any, {}, Representation.State>
 
-const EmptyRepresentationProvider = {
+export const EmptyRepresentationProvider: RepresentationProvider = {
+    name: '',
     label: '',
     description: '',
     factory: () => Representation.Empty,
     getParams: () => ({}),
-    defaultValues: {}
+    defaultValues: {},
+    defaultColorTheme: { name: '' },
+    defaultSizeTheme: { name: '' },
+    isApplicable: () => true
 };
 
 function getTypes(list: { name: string, provider: RepresentationProvider<any, any, any> }[]) {
@@ -78,9 +89,9 @@ function getTypes(list: { name: string, provider: RepresentationProvider<any, an
 }
 
 export class RepresentationRegistry<D, S extends Representation.State> {
-    private _list: { name: string, provider: RepresentationProvider<D, any, any> }[] = []
-    private _map = new Map<string, RepresentationProvider<D, any, any>>()
-    private _name = new Map<RepresentationProvider<D, any, any>, string>()
+    private _list: { name: string, provider: RepresentationProvider<D, any, any> }[] = [];
+    private _map = new Map<string, RepresentationProvider<D, any, any>>();
+    private _name = new Map<RepresentationProvider<D, any, any>, string>();
 
     get default() { return this._list[0]; }
     get types(): [string, string][] { return getTypes(this._list); }
@@ -114,7 +125,7 @@ export class RepresentationRegistry<D, S extends Representation.State> {
     }
 
     get<P extends PD.Params>(name: string): RepresentationProvider<D, P, S> {
-        return this._map.get(name) || EmptyRepresentationProvider as unknown as RepresentationProvider<D, P, S>;
+        return this._map.get(name) || EmptyRepresentationProvider;
     }
 
     get list() {
@@ -128,17 +139,24 @@ export class RepresentationRegistry<D, S extends Representation.State> {
     getApplicableTypes(data: D) {
         return getTypes(this.getApplicableList(data));
     }
+
+    clear() {
+        this._list.length = 0;
+        this._map.clear();
+        this._name.clear();
+    }
 }
 
 //
 
 export { Representation };
-interface Representation<D, P extends PD.Params = {}, S extends Representation.State = Representation.State> {
+interface Representation<D, P extends PD.Params = PD.Params, S extends Representation.State = Representation.State> {
     readonly label: string
     readonly updated: Subject<number>
     /** Number of addressable groups in all visuals of the representation */
     readonly groupCount: number
     readonly renderObjects: ReadonlyArray<GraphicsRenderObject>
+    readonly geometryVersion: number
     readonly props: Readonly<PD.Values<P>>
     readonly params: Readonly<P>
     readonly state: Readonly<S>
@@ -146,8 +164,9 @@ interface Representation<D, P extends PD.Params = {}, S extends Representation.S
     createOrUpdate: (props?: Partial<PD.Values<P>>, data?: D) => Task<void>
     setState: (state: Partial<S>) => void
     setTheme: (theme: Theme) => void
-    /** If no pickingId is given, returns a Loci for the whole representation */
-    getLoci: (pickingId?: PickingId) => ModelLoci
+    getLoci: (pickingId: PickingId) => ModelLoci
+    getAllLoci: () => ModelLoci[]
+    eachLocation: (cb: LocationCallback) => void
     mark: (loci: ModelLoci, action: MarkerAction) => boolean
     destroy: () => void
 }
@@ -179,8 +198,14 @@ namespace Representation {
         overpaint: Overpaint
         /** Per group transparency applied to the representation's renderobjects */
         transparency: Transparency
+        /** Per group emissive applied to the representation's renderobjects */
+        emissive: Emissive
+        /** Per group material applied to the representation's renderobjects */
+        substance: Substance
         /** Bit mask of per group clipping applied to the representation's renderobjects */
         clipping: Clipping
+        /** Strength of the representations overpaint, transparency, emmissive, substance*/
+        themeStrength: { overpaint: number, transparency: number, emissive: number, substance: number }
         /** Controls if the representation's renderobjects are synced automatically with GPU or not */
         syncManually: boolean
         /** A transformation applied to the representation's renderobjects */
@@ -189,7 +214,21 @@ namespace Representation {
         markerActions: MarkerActions
     }
     export function createState(): State {
-        return { visible: true, alphaFactor: 1, pickable: true, colorOnly: false, syncManually: false, transform: Mat4.identity(), overpaint: Overpaint.Empty, transparency: Transparency.Empty, clipping: Clipping.Empty, markerActions: MarkerActions.All };
+        return {
+            visible: true,
+            alphaFactor: 1,
+            pickable: true,
+            colorOnly: false,
+            syncManually: false,
+            transform: Mat4.identity(),
+            overpaint: Overpaint.Empty,
+            transparency: Transparency.Empty,
+            emissive: Emissive.Empty,
+            substance: Substance.Empty,
+            clipping: Clipping.Empty,
+            themeStrength: { overpaint: 1, transparency: 1, emissive: 1, substance: 1 },
+            markerActions: MarkerActions.All
+        };
     }
     export function updateState(state: State, update: Partial<State>) {
         if (update.visible !== undefined) state.visible = update.visible;
@@ -198,7 +237,10 @@ namespace Representation {
         if (update.colorOnly !== undefined) state.colorOnly = update.colorOnly;
         if (update.overpaint !== undefined) state.overpaint = update.overpaint;
         if (update.transparency !== undefined) state.transparency = update.transparency;
+        if (update.emissive !== undefined) state.emissive = update.emissive;
+        if (update.substance !== undefined) state.substance = update.substance;
         if (update.clipping !== undefined) state.clipping = update.clipping;
+        if (update.themeStrength !== undefined) state.themeStrength = update.themeStrength;
         if (update.syncManually !== undefined) state.syncManually = update.syncManually;
         if (update.transform !== undefined) Mat4.copy(state.transform, update.transform);
         if (update.markerActions !== undefined) state.markerActions = update.markerActions;
@@ -209,22 +251,61 @@ namespace Representation {
     }
     export const StateBuilder: StateBuilder<State> = { create: createState, update: updateState };
 
-    export type Any = Representation<any, any, any>
-    export const Empty: Any = {
-        label: '', groupCount: 0, renderObjects: [], props: {}, params: {}, updated: new Subject(), state: createState(), theme: Theme.createEmpty(),
-        createOrUpdate: () => Task.constant('', undefined),
-        setState: () => {},
-        setTheme: () => {},
-        getLoci: () => EmptyLoci,
-        mark: () => false,
-        destroy: () => {}
-    };
+    export type Any<P extends PD.Params = PD.Params, S extends State = State> = Representation<any, P, S>
 
-    export type Def<D, P extends PD.Params = {}, S extends State = State> = { [k: string]: RepresentationFactory<D, P, S> }
 
-    export function createMulti<D, P extends PD.Params = {}, S extends State = State>(label: string, ctx: RepresentationContext, getParams: RepresentationParamsGetter<D, P>, stateBuilder: StateBuilder<S>, reprDefs: Def<D, P>): Representation<D, P, S> {
+    export declare const Empty: Any;
+
+    export function createEmpty(): Any {
+        return {
+            label: '',
+            groupCount: 0,
+            renderObjects: [],
+            geometryVersion: -1,
+            props: {},
+            params: {},
+            updated: new Subject(),
+            state: createState(),
+            theme: Theme.createEmpty(),
+            createOrUpdate: () => Task.constant('', undefined),
+            setState: () => {},
+            setTheme: () => {},
+            getLoci: () => EmptyLoci,
+            getAllLoci: () => [],
+            eachLocation: () => {},
+            mark: () => false,
+            destroy: () => {}
+        };
+    }
+
+    export type Def<D, P extends PD.Params = PD.Params, S extends State = State> = { [k: string]: RepresentationFactory<D, P, S> }
+
+    export class GeometryState {
+        private curr = new Set<number>();
+        private next = new Set<number>();
+
+        private _version = -1;
+        get version() {
+            return this._version;
+        }
+
+        add(id: number, version: number) {
+            this.next.add(cantorPairing(id, version));
+        }
+
+        snapshot() {
+            if (!SetUtils.areEqual(this.curr, this.next)) {
+                this._version += 1;
+            }
+            [this.curr, this.next] = [this.next, this.curr];
+            this.next.clear();
+        }
+    }
+
+    export function createMulti<D, P extends PD.Params = PD.Params, S extends State = State>(label: string, ctx: RepresentationContext, getParams: RepresentationParamsGetter<D, P>, stateBuilder: StateBuilder<S>, reprDefs: Def<D, P>): Representation<D, P, S> {
         let version = 0;
         const updated = new Subject<number>();
+        const geometryState = new GeometryState();
         const currentState = stateBuilder.create();
         let currentTheme = Theme.createEmpty();
 
@@ -267,6 +348,7 @@ namespace Representation {
                 }
                 return renderObjects;
             },
+            get geometryVersion() { return geometryState.version; },
             get props() { return currentProps; },
             get params() { return currentParams; },
             createOrUpdate: (props: Partial<P> = {}, data?: D) => {
@@ -284,13 +366,15 @@ namespace Representation {
                         if (!visuals || visuals.includes(reprMap[i])) {
                             await reprList[i].createOrUpdate(currentProps, currentData).runInContext(runtime);
                         }
+                        geometryState.add(i, reprList[i].geometryVersion);
                     }
+                    geometryState.snapshot();
                     updated.next(version++);
                 });
             },
             get state() { return currentState; },
             get theme() { return currentTheme; },
-            getLoci: (pickingId?: PickingId) => {
+            getLoci: (pickingId: PickingId) => {
                 const { visuals } = currentProps;
                 for (let i = 0, il = reprList.length; i < il; ++i) {
                     if (!visuals || visuals.includes(reprMap[i])) {
@@ -299,6 +383,24 @@ namespace Representation {
                     }
                 }
                 return EmptyLoci;
+            },
+            getAllLoci: () => {
+                const loci: ModelLoci[] = [];
+                const { visuals } = currentProps;
+                for (let i = 0, il = reprList.length; i < il; ++i) {
+                    if (!visuals || visuals.includes(reprMap[i])) {
+                        loci.push(...reprList[i].getAllLoci());
+                    }
+                }
+                return loci;
+            },
+            eachLocation: (cb: LocationCallback) => {
+                const { visuals } = currentProps;
+                for (let i = 0, il = reprList.length; i < il; ++i) {
+                    if (!visuals || visuals.includes(reprMap[i])) {
+                        reprList[i].eachLocation(cb);
+                    }
+                }
             },
             mark: (loci: ModelLoci, action: MarkerAction) => {
                 let marked = false;
@@ -310,7 +412,7 @@ namespace Representation {
             setState: (state: Partial<S>) => {
                 stateBuilder.update(currentState, state);
                 for (let i = 0, il = reprList.length; i < il; ++i) {
-                    reprList[i].setState(currentState);
+                    reprList[i].setState(state); // only set the new (partial) state
                 }
             },
             setTheme: (theme: Theme) => {
@@ -330,6 +432,7 @@ namespace Representation {
     export function fromRenderObject(label: string, renderObject: GraphicsRenderObject): Representation<GraphicsRenderObject, BaseGeometry.Params> {
         let version = 0;
         const updated = new Subject<number>();
+        const geometryState = new GeometryState();
         const currentState = Representation.createState();
         const currentTheme = Theme.createEmpty();
 
@@ -341,6 +444,7 @@ namespace Representation {
             updated,
             get groupCount() { return renderObject.values.uGroupCount.ref.value; },
             get renderObjects() { return [renderObject]; },
+            get geometryVersion() { return geometryState.version; },
             get props() { return currentProps; },
             get params() { return currentParams; },
             createOrUpdate: (props: Partial<PD.Values<BaseGeometry.Params>> = {}) => {
@@ -349,6 +453,8 @@ namespace Representation {
 
                 return Task.create(`Updating '${label}' representation`, async runtime => {
                     // TODO
+                    geometryState.add(0, renderObject.id);
+                    geometryState.snapshot();
                     updated.next(version++);
                 });
             },
@@ -357,6 +463,13 @@ namespace Representation {
             getLoci: () => {
                 // TODO
                 return EmptyLoci;
+            },
+            getAllLoci: () => {
+                // TODO
+                return [];
+            },
+            eachLocation: () => {
+                // TODO
             },
             mark: (loci: ModelLoci, action: MarkerAction) => {
                 // TODO
@@ -373,6 +486,16 @@ namespace Representation {
                 if (state.transparency !== undefined) {
                     // TODO
                 }
+                if (state.emissive !== undefined) {
+                    // TODO
+                }
+                if (state.substance !== undefined) {
+                    // TODO
+                }
+                if (state.clipping !== undefined) {
+                    // TODO
+                }
+                if (state.themeStrength !== undefined) Visual.setThemeStrength(renderObject, state.themeStrength);
                 if (state.transform !== undefined) Visual.setTransform(renderObject, state.transform);
 
                 Representation.updateState(currentState, state);
@@ -382,3 +505,10 @@ namespace Representation {
         };
     }
 }
+
+let _EmptyRepresentation: Representation.Any | undefined = undefined;
+Object.defineProperty(Representation, "Empty", {
+    get: () => {
+        return _EmptyRepresentation ??= Representation.createEmpty();
+    }
+});

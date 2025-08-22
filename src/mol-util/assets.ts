@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -9,6 +9,7 @@ import { UUID } from './uuid';
 import { iterableToArray } from '../mol-data/util';
 import { ajaxGet, DataType, DataResponse, readFromFile } from './data-source';
 import { Task } from '../mol-task';
+import { File_ as File } from './nodejs-shims';
 
 export { AssetManager, Asset };
 
@@ -66,7 +67,7 @@ class AssetManager {
     // TODO: add URL based ref-counted cache?
     // TODO: when serializing, check for duplicates?
 
-    private _assets = new Map<string, { asset: Asset, file: File, refCount: number }>();
+    private _assets = new Map<string, { asset: Asset, file: File, refCount: number, isStatic?: boolean, tag?: string }>();
 
     get assets() {
         return iterableToArray(this._assets.values());
@@ -82,8 +83,20 @@ class AssetManager {
         }
     }
 
-    set(asset: Asset, file: File) {
-        this._assets.set(asset.id, { asset, file, refCount: 0 });
+    set(asset: Asset, file: File, options?: { isStatic?: boolean, tag?: string }) {
+        this._assets.set(asset.id, { asset, file, refCount: 0, tag: options?.tag, isStatic: options?.isStatic });
+    }
+
+    get(asset: Asset) {
+        return this._assets.get(asset.id);
+    }
+
+    delete(asset: Asset) {
+        return this._assets.delete(asset.id);
+    }
+
+    has(asset: Asset) {
+        return this._assets.has(asset.id);
     }
 
     resolve<T extends DataType>(asset: Asset, type: T, store = true): Task<Asset.Wrapper<T>> {
@@ -126,6 +139,24 @@ class AssetManager {
         const entry = this._assets.get(asset.id);
         if (!entry) return;
         entry.refCount--;
-        if (entry.refCount <= 0) this._assets.delete(asset.id);
+        if (entry.refCount <= 0 && !entry.isStatic) this._assets.delete(asset.id);
+    }
+
+    clearTag(tag: string) {
+        const keys = Array.from(this._assets.keys());
+        for (const key of keys) {
+            const entry = this._assets.get(key);
+            if (entry && entry.tag === tag) {
+                this._assets.delete(key);
+            }
+        }
+    }
+
+    clear() {
+        this._assets.clear();
+    }
+
+    dispose() {
+        this.clear();
     }
 }

@@ -4,10 +4,10 @@
  * Taken/adapted from DensityServer (https://github.com/dsehnal/DensityServer)
  *
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Gianluca Tomasello <giagitom@gmail.com>
  */
 
 import * as DataFormat from '../../common/data-format';
-import * as File from '../../common/file';
 import * as Data from './data-model';
 import * as Coords from '../algebra/coordinate';
 import * as Box from '../algebra/box';
@@ -23,7 +23,7 @@ import { UUID } from '../../../../mol-util';
 import { FileHandle } from '../../../../mol-io/common/file-handle';
 import { createTypedArray, TypedArrayValueType } from '../../../../mol-io/common/typed-array';
 import { LimitsConfig } from '../../config';
-import { fileHandleFromDescriptor } from '../../../common/file-handle';
+import { fileHandleFromPathOrUrl } from '../../../common/file-handle';
 
 export async function execute(params: Data.QueryParams, outputProvider: () => Data.QueryOutputStream) {
     const start = getTime();
@@ -35,7 +35,7 @@ export async function execute(params: Data.QueryParams, outputProvider: () => Da
 
     let sourceFile: FileHandle | undefined;
     try {
-        sourceFile = fileHandleFromDescriptor(await File.openRead(params.sourceFilename), params.sourceFilename);
+        sourceFile = await fileHandleFromPathOrUrl(params.sourceFilename, params.sourceFilename);
         await _execute(sourceFile, params, guid, outputProvider);
         return true;
     } catch (e) {
@@ -98,8 +98,10 @@ async function createDataContext(file: FileHandle): Promise<Data.DataContext> {
     };
 }
 
-function createQuerySampling(data: Data.DataContext, sampling: Data.Sampling, queryBox: Box.Fractional): Data.QuerySamplingInfo {
-    const fractionalBox = Box.gridToFractional(Box.expandGridBox(Box.fractionalToGrid(queryBox, sampling.dataDomain), 1));
+function createQuerySampling(data: Data.DataContext, sampling: Data.Sampling, queryBox: Box.Fractional, queryParamsBox: Data.QueryParamsBox): Data.QuerySamplingInfo {
+    const fractionalBox = queryParamsBox.kind === 'Cell' ?
+        Box.gridToFractional(Box.fractionalToGrid(queryBox, sampling.dataDomain)) :
+        Box.gridToFractional(Box.expandGridBox(Box.fractionalToGrid(queryBox, sampling.dataDomain), 1));
     const blocks = findUniqueBlocks(data, sampling, fractionalBox);
     const ret = {
         sampling,
@@ -110,9 +112,9 @@ function createQuerySampling(data: Data.DataContext, sampling: Data.Sampling, qu
     return ret;
 }
 
-function pickSampling(data: Data.DataContext, queryBox: Box.Fractional, forcedLevel: number, precision: number): Data.QuerySamplingInfo {
+function pickSampling(data: Data.DataContext, queryBox: Box.Fractional, forcedLevel: number, precision: number, queryParamsBox: Data.QueryParamsBox): Data.QuerySamplingInfo {
     if (forcedLevel > 0) {
-        return createQuerySampling(data, data.sampling[Math.min(data.sampling.length, forcedLevel) - 1], queryBox);
+        return createQuerySampling(data, data.sampling[Math.min(data.sampling.length, forcedLevel) - 1], queryBox, queryParamsBox);
     }
 
     const sizeLimit = LimitsConfig.maxOutputSizeInVoxelCountByPrecisionLevel[precision] || (2 * 1024 * 1024);
@@ -122,14 +124,14 @@ function pickSampling(data: Data.DataContext, queryBox: Box.Fractional, forcedLe
         const approxSize = Box.volume(gridBox);
 
         if (approxSize <= sizeLimit) {
-            const sampling = createQuerySampling(data, s, queryBox);
+            const sampling = createQuerySampling(data, s, queryBox, queryParamsBox);
             if (sampling.blocks.length <= LimitsConfig.maxRequestBlockCount) {
                 return sampling;
             }
         }
     }
 
-    return createQuerySampling(data, data.sampling[data.sampling.length - 1], queryBox);
+    return createQuerySampling(data, data.sampling[data.sampling.length - 1], queryBox, queryParamsBox);
 }
 
 function emptyQueryContext(data: Data.DataContext, params: Data.QueryParams, guid: string): Data.QueryContext {
@@ -173,7 +175,7 @@ function createQueryContext(data: Data.DataContext, params: Data.QueryParams, gu
         throw new Error('The query box volume is too big.');
     }
 
-    const samplingInfo = pickSampling(data, queryBox, params.forcedSamplingLevel !== void 0 ? params.forcedSamplingLevel : 0, params.detail);
+    const samplingInfo = pickSampling(data, queryBox, params.forcedSamplingLevel !== void 0 ? params.forcedSamplingLevel : 0, params.detail, params.box);
 
     if (samplingInfo.blocks.length === 0) return emptyQueryContext(data, params, guid);
 
@@ -207,14 +209,20 @@ async function _execute(file: FileHandle, params: Data.QueryParams, guid: string
         encode(query, output);
         output.end();
     } catch (e) {
-        const query: Data.QueryContext = { kind: 'Error', guid, params, message: `${e}` };
-        try {
-            if (!output) output = outputProvider();
-            encode(query, output);
-        } catch (f) {
-            throw f;
+        if (e.isFileNotFound) {
+            // Just let respond with 404
+            throw e;
+        } else {
+            // Try to respond with body with error details
+            const query: Data.QueryContext = { kind: 'Error', guid, params, message: `${e}` };
+            try {
+                if (!output) output = outputProvider();
+                encode(query, output);
+            } catch (f) {
+                throw f;
+            }
+            throw e;
         }
-        throw e;
     } finally {
         if (output) output.end();
     }

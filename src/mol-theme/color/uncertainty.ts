@@ -1,15 +1,17 @@
 /**
- * Copyright (c) 2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Lukáš Polák <admin@lukaspolak.cz>
  */
 
 import { Color, ColorScale } from '../../mol-util/color';
 import { StructureElement, Unit, Bond, ElementIndex } from '../../mol-model/structure';
 import { Location } from '../../mol-model/location';
-import { ColorTheme } from '../color';
+import type { ColorTheme } from '../color';
 import { ParamDefinition as PD } from '../../mol-util/param-definition';
 import { ThemeDataContext } from '../theme';
+import { ColorThemeCategory } from './categories';
 
 const DefaultUncertaintyColor = Color(0xffff99);
 const Description = `Assigns a color based on the uncertainty or disorder of an element's position, e.g. B-factor or RMSF, depending on the data availability and experimental technique.`;
@@ -34,11 +36,21 @@ export function getUncertainty(unit: Unit, element: ElementIndex): number {
 }
 
 export function UncertaintyColorTheme(ctx: ThemeDataContext, props: PD.Values<UncertaintyColorThemeParams>): ColorTheme<UncertaintyColorThemeParams> {
-    const scale = ColorScale.create({
-        reverse: true,
-        domain: props.domain,
-        listOrName: props.list.colors,
-    });
+    let scale: ColorScale;
+
+    if (props.list.kind === 'set') {
+        scale = ColorScale.createDiscrete({
+            reverse: true,
+            domain: props.domain,
+            listOrName: props.list.colors
+        });
+    } else {
+        scale = ColorScale.create({
+            reverse: true,
+            domain: props.domain,
+            listOrName: props.list.colors
+        });
+    }
 
     // TODO calc domain based on data, set min/max as 10/90 percentile to be robust against outliers
 
@@ -65,7 +77,7 @@ export function UncertaintyColorTheme(ctx: ThemeDataContext, props: PD.Values<Un
 export const UncertaintyColorThemeProvider: ColorTheme.Provider<UncertaintyColorThemeParams, 'uncertainty'> = {
     name: 'uncertainty',
     label: 'Uncertainty/Disorder',
-    category: ColorTheme.Category.Atom,
+    category: ColorThemeCategory.Atom,
     factory: UncertaintyColorTheme,
     getParams: getUncertaintyColorThemeParams,
     defaultValues: PD.getDefaultValues(UncertaintyColorThemeParams),

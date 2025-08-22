@@ -1,11 +1,12 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import * as React from 'react';
+import ReactMarkdown from 'react-markdown';
 import { UpdateTrajectory } from '../mol-plugin-state/actions/structure';
 import { LociLabel } from '../mol-plugin-state/manager/loci-label';
 import { PluginStateObject } from '../mol-plugin-state/objects';
@@ -13,9 +14,9 @@ import { StateTransforms } from '../mol-plugin-state/transforms';
 import { ModelFromTrajectory } from '../mol-plugin-state/transforms/model';
 import { PluginCommands } from '../mol-plugin/commands';
 import { StateTransformer } from '../mol-state';
-import { PluginUIComponent } from './base';
+import { PluginReactContext, PluginUIComponent } from './base';
 import { IconButton } from './controls/common';
-import { Icon, NavigateBeforeSvg, NavigateNextSvg, SkipPreviousSvg, StopSvg, PlayArrowSvg, SubscriptionsOutlinedSvg, BuildSvg } from './controls/icons';
+import { Icon, NavigateBeforeSvg, NavigateNextSvg, SkipPreviousSvg, StopSvg, PlayArrowSvg, SubscriptionsOutlinedSvg, BuildSvg, AnimationSvg, RefreshSvg } from './controls/icons';
 import { AnimationControls } from './state/animation';
 import { StructureComponentControls } from './structure/components';
 import { StructureMeasurementsControls } from './structure/measurements';
@@ -24,9 +25,13 @@ import { StructureSourceControls } from './structure/source';
 import { VolumeStreamingControls, VolumeSourceControls } from './structure/volume';
 import { PluginConfig } from '../mol-plugin/config';
 import { StructureSuperpositionControls } from './structure/superposition';
+import { StructureQuickStylesControls } from './structure/quick-styles';
+import { Markdown } from './controls/markdown';
+import { Slider } from './controls/slider';
+import { AnimateStateSnapshotTransition } from '../mol-plugin-state/animation/built-in/state-snapshots';
 
 export class TrajectoryViewportControls extends PluginUIComponent<{}, { show: boolean, label: string }> {
-    state = { show: false, label: '' }
+    state = { show: false, label: '' };
 
     private update = () => {
         const state = this.plugin.state.data;
@@ -63,7 +68,7 @@ export class TrajectoryViewportControls extends PluginUIComponent<{}, { show: bo
 
         if (count > 1) label = '';
         this.setState({ show: count > 0, label });
-    }
+    };
 
     componentDidMount() {
         this.subscribe(this.plugin.state.data.events.changed, this.update);
@@ -88,22 +93,21 @@ export class TrajectoryViewportControls extends PluginUIComponent<{}, { show: bo
     render() {
         const isAnimating = this.plugin.behaviors.state.isAnimating.value;
 
-        if (!this.state.show || (isAnimating && !this.state.label)) return null;
+        if (!this.state.show || (isAnimating && !this.state.label) || !this.plugin.config.get(PluginConfig.Viewport.ShowTrajectoryControls)) return null;
 
         return <div className='msp-traj-controls'>
             {!isAnimating && <IconButton svg={SkipPreviousSvg} title='First Model' onClick={this.reset} disabled={isAnimating} />}
             {!isAnimating && <IconButton svg={NavigateBeforeSvg} title='Previous Model' onClick={this.prev} disabled={isAnimating} />}
             {!isAnimating && <IconButton svg={NavigateNextSvg} title='Next Model' onClick={this.next} disabled={isAnimating} />}
-            {!!this.state.label && <span>{this.state.label}</span> }
+            {!!this.state.label && <span>{this.state.label}</span>}
         </div>;
     }
 }
 
-export class StateSnapshotViewportControls extends PluginUIComponent<{}, { isBusy: boolean, show: boolean }> {
-    state = { isBusy: false, show: true }
+export class StateSnapshotViewportControls extends PluginUIComponent<{}, { isBusy: boolean, show: boolean, showAnimation: boolean }> {
+    state = { isBusy: false, show: true, showAnimation: false };
 
     componentDidMount() {
-        // TODO: this needs to be diabled when the state is updating!
         this.subscribe(this.plugin.managers.snapshot.events.changed, () => this.forceUpdate());
         this.subscribe(this.plugin.behaviors.state.isBusy, isBusy => this.setState({ isBusy }));
         this.subscribe(this.plugin.behaviors.state.isAnimating, isBusy => this.setState({ isBusy }));
@@ -125,7 +129,7 @@ export class StateSnapshotViewportControls extends PluginUIComponent<{}, { isBus
         } else if (e.keyCode === 38 || e.key === 'ArrowUp') {
             if (snapshots.state.isPlaying) snapshots.stop();
             if (snapshots.state.entries.size === 0) return;
-            const e = snapshots.state.entries.get(0);
+            const e = snapshots.state.entries.get(0)!;
             this.update(e.snapshot.id);
         } else if (e.keyCode === 39 || e.key === 'ArrowRight') {
             if (snapshots.state.isPlaying) snapshots.stop();
@@ -133,7 +137,7 @@ export class StateSnapshotViewportControls extends PluginUIComponent<{}, { isBus
         } else if (e.keyCode === 40 || e.key === 'ArrowDown') {
             if (snapshots.state.isPlaying) snapshots.stop();
             if (snapshots.state.entries.size === 0) return;
-            const e = snapshots.state.entries.get(snapshots.state.entries.size - 1);
+            const e = snapshots.state.entries.get(snapshots.state.entries.size - 1)!;
             this.update(e.snapshot.id);
         }
     };
@@ -147,48 +151,109 @@ export class StateSnapshotViewportControls extends PluginUIComponent<{}, { isBus
     change = (e: React.ChangeEvent<HTMLSelectElement>) => {
         if (e.target.value === 'none') return;
         this.update(e.target.value);
-    }
+    };
 
     prev = () => {
         const s = this.plugin.managers.snapshot;
         const id = s.getNextId(s.state.current, -1);
         if (id) this.update(id);
-    }
+    };
 
     next = () => {
         const s = this.plugin.managers.snapshot;
         const id = s.getNextId(s.state.current, 1);
         if (id) this.update(id);
-    }
+    };
 
     togglePlay = () => {
         this.plugin.managers.snapshot.togglePlay();
+    };
+
+    toggleShowAnimation = () => {
+        this.setState({ showAnimation: !this.state.showAnimation });
+    };
+
+    toggleStateAnimation = () => {
+        if (this.state.isBusy) {
+            this.plugin.managers.animation.stop();
+        } else {
+            this.plugin.managers.animation.play(AnimateStateSnapshotTransition, {});
+        }
+    };
+
+    get isStateTransitionPlaying() {
+        return this.plugin.managers.animation.isAnimatingStateTransition;
     }
 
     render() {
         const snapshots = this.plugin.managers.snapshot;
         const count = snapshots.state.entries.size;
 
-        if (count < 2 || !this.state.show) {
+        if (!count || !this.state.show) {
             return null;
         }
 
         const current = snapshots.state.current;
         const isPlaying = snapshots.state.isPlaying;
+        const entry = snapshots.getEntry(current);
+        const hasAnimation = !!entry?.snapshot.transition;
+
+        const disabled = isPlaying || (this.state.isBusy && !this.isStateTransitionPlaying);
 
         return <div className='msp-state-snapshot-viewport-controls'>
-            <select className='msp-form-control' value={current || 'none'} onChange={this.change} disabled={this.state.isBusy || isPlaying}>
+            <select className='msp-form-control' value={current || 'none'} onChange={this.change} disabled={disabled}>
                 {!current && <option key='none' value='none'></option>}
                 {snapshots.state.entries.valueSeq().map((e, i) => <option key={e!.snapshot.id} value={e!.snapshot.id}>{`[${i! + 1}/${count}]`} {e!.name || new Date(e!.timestamp).toLocaleString()}</option>)}
             </select>
             <IconButton svg={isPlaying ? StopSvg : PlayArrowSvg} title={isPlaying ? 'Pause' : 'Cycle States'} onClick={this.togglePlay}
-                disabled={isPlaying ? false : this.state.isBusy} />
+                disabled={isPlaying ? false : (this.state.isBusy && !this.isStateTransitionPlaying)} />
             {!isPlaying && <>
-                <IconButton svg={NavigateBeforeSvg} title='Previous State' onClick={this.prev} disabled={this.state.isBusy || isPlaying} />
-                <IconButton svg={NavigateNextSvg} title='Next State' onClick={this.next} disabled={this.state.isBusy || isPlaying} />
+                {count > 1 && <IconButton svg={NavigateBeforeSvg} title='Previous State' onClick={this.prev} disabled={disabled} />}
+                {count > 1 && <IconButton svg={NavigateNextSvg} title='Next State' onClick={this.next} disabled={disabled} />}
+                {hasAnimation && <IconButton svg={AnimationSvg} className='msp-state-snapshot-animation-button' title='Animation' onClick={this.toggleShowAnimation} disabled={!hasAnimation} toggleState={this.state.showAnimation} />}
+            </>}
+            {hasAnimation && this.state.showAnimation && !isPlaying && <>
+                <div className='msp-state-snapshot-animation-slider msp-form-control'>
+                    <Slider
+                        value={snapshots.state.currentAnimationFrame ?? 0}
+                        min={1}
+                        step={1}
+                        max={(entry?.snapshot.transition?.frames.length ?? 1)}
+                        onChange={() => { }}
+                        onChangeImmediate={v => {
+                            snapshots.setSnapshotAnimationFrame(v - 1, true);
+                        }}
+                        hideInput
+                        disabled={this.state.isBusy}
+                    />
+                    &nbsp;
+                </div>
+                <IconButton svg={this.state.isBusy ? StopSvg : RefreshSvg} title={this.state.isBusy ? 'Stop' : 'Replay'} onClick={this.toggleStateAnimation} toggleState={false} />
             </>}
         </div>;
     }
+}
+
+export function ViewportSnapshotDescription() {
+    const plugin = React.useContext(PluginReactContext);
+    const [_, setV] = React.useState(0);
+    React.useEffect(() => {
+        const sub = plugin.managers.snapshot.events.changed.subscribe(() => setV(v => v + 1));
+        return () => sub.unsubscribe();
+    }, [plugin]);
+
+    const current = plugin.managers.snapshot.state.current;
+    if (!current) return null;
+
+    const e = plugin.managers.snapshot.getEntry(current)!;
+    if (!e?.description?.trim()) return null;
+
+    return <div id='snapinfo' className='msp-snapshot-description-wrapper'>
+        {e.descriptionFormat === 'plaintext'
+            && e.description
+            || <Markdown>{e.description}</Markdown>
+        }
+    </div>;
 }
 
 export class AnimationViewportControls extends PluginUIComponent<{}, { isEmpty: boolean, isExpanded: boolean, isBusy: boolean, isAnimating: boolean, isPlaying: boolean }> {
@@ -212,7 +277,7 @@ export class AnimationViewportControls extends PluginUIComponent<{}, { isEmpty: 
     stop = () => {
         this.plugin.managers.animation.stop();
         this.plugin.managers.snapshot.stop();
-    }
+    };
 
     render() {
         const isPlaying = this.plugin.managers.snapshot.state.isPlaying;
@@ -239,21 +304,16 @@ export class SelectionViewportControls extends PluginUIComponent {
         this.subscribe(this.plugin.behaviors.interaction.selectionMode, () => this.forceUpdate());
     }
 
-    onMouseMove = (e: React.MouseEvent) => {
-        // ignore mouse moves when no button is held
-        if (e.buttons === 0) e.stopPropagation();
-    }
-
     render() {
         if (!this.plugin.selectionMode) return null;
-        return <div className='msp-selection-viewport-controls' onMouseMove={this.onMouseMove}>
+        return <div className='msp-selection-viewport-controls'>
             <StructureSelectionActionsControls />
         </div>;
     }
 }
 
 export class LociLabels extends PluginUIComponent<{}, { labels: ReadonlyArray<LociLabel> }> {
-    state = { labels: [] }
+    state = { labels: [] as string[] };
 
     componentDidMount() {
         this.subscribe(this.plugin.behaviors.labels.highlight, e => this.setState({ labels: e.labels }));
@@ -265,7 +325,15 @@ export class LociLabels extends PluginUIComponent<{}, { labels: ReadonlyArray<Lo
         }
 
         return <div className='msp-highlight-info'>
-            {this.state.labels.map((e, i) => <div key={'' + i} dangerouslySetInnerHTML={{ __html: e }} />)}
+            {this.state.labels.map((e, i) => {
+                if (e.indexOf('\n') >= 0) {
+                    return <div className='msp-highlight-markdown-row' key={'' + i}>
+                        <ReactMarkdown skipHtml>{e}</ReactMarkdown>
+                    </div>;
+                }
+
+                return <div className='msp-highlight-simple-row' key={'' + i} dangerouslySetInnerHTML={{ __html: e }} />;
+            })}
         </div>;
     }
 }
@@ -292,6 +360,7 @@ export class DefaultStructureTools extends PluginUIComponent {
             <StructureSourceControls />
             <StructureMeasurementsControls />
             <StructureSuperpositionControls />
+            <StructureQuickStylesControls />
             <StructureComponentControls />
             {this.plugin.config.get(PluginConfig.VolumeStreaming.Enabled) && <VolumeStreamingControls />}
             <VolumeSourceControls />

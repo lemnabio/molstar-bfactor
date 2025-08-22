@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2018 Mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 Mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import { UniqueArray } from '../../../mol-data/generic';
@@ -53,10 +54,15 @@ export const SymbolTable = [
         Alias(MolScript.core.math.mod, 'mod'),
         Alias(MolScript.core.math.min, 'min'),
         Alias(MolScript.core.math.max, 'max'),
+        Alias(MolScript.core.math.cantorPairing, 'cantor-pairing'),
+        Alias(MolScript.core.math.sortedCantorPairing, 'sorted-cantor-pairing'),
+        Alias(MolScript.core.math.invertCantorPairing, 'invert-cantor-pairing'),
         Alias(MolScript.core.math.floor, 'floor'),
         Alias(MolScript.core.math.ceil, 'ceil'),
         Alias(MolScript.core.math.roundInt, 'round'),
+        Alias(MolScript.core.math.trunc, 'trunc'),
         Alias(MolScript.core.math.abs, 'abs'),
+        Alias(MolScript.core.math.sign, 'sign'),
         Alias(MolScript.core.math.sqrt, 'sqrt'),
         Alias(MolScript.core.math.cbrt, 'cbrt'),
         Alias(MolScript.core.math.sin, 'sin'),
@@ -205,6 +211,8 @@ export const SymbolTable = [
             Alias(MolScript.structureQuery.atomProperty.core.z, 'atom.z'),
             Alias(MolScript.structureQuery.atomProperty.core.sourceIndex, 'atom.src-index'),
             Alias(MolScript.structureQuery.atomProperty.core.operatorName, 'atom.op-name'),
+            Alias(MolScript.structureQuery.atomProperty.core.instanceId, 'atom.instance-id'),
+            Alias(MolScript.structureQuery.atomProperty.core.operatorKey, 'atom.op-key'),
             Alias(MolScript.structureQuery.atomProperty.core.modelIndex, 'atom.model-index'),
             Alias(MolScript.structureQuery.atomProperty.core.modelLabel, 'atom.model-label'),
             Alias(MolScript.structureQuery.atomProperty.core.atomKey, 'atom.key'),
@@ -245,6 +253,9 @@ export const SymbolTable = [
             Alias(MolScript.structureQuery.atomProperty.macromolecular.isModified, 'atom.is-modified'),
             Alias(MolScript.structureQuery.atomProperty.macromolecular.modifiedParentName, 'atom.modified-parent'),
 
+            Alias(MolScript.structureQuery.atomProperty.ihm.hasSeqId, 'atom.ihm.has-seq-id'),
+            Alias(MolScript.structureQuery.atomProperty.ihm.overlapsSeqIdRange, 'atom.ihm.overlaps-seq-id-range'),
+
             // Macro(MSymbol('atom.sec-struct.is', Arguments.List(Struct.Types.SecondaryStructureFlag), Type.Bool,
             //     `Test if the current atom is part of an secondary structure. Optionally specify allowed sec. struct. types: ${Type.oneOfValues(Struct.Types.SecondaryStructureFlag).join(', ')}`),
             // args => B.core.flags.hasAny([B.struct.atomProperty.macromolecular.secondaryStructureFlags(), B.struct.type.secondaryStructureFlags(args)])),
@@ -253,6 +264,7 @@ export const SymbolTable = [
             'Bond Properties',
             Alias(MolScript.structureQuery.bondProperty.order, 'bond.order'),
             Alias(MolScript.structureQuery.bondProperty.length, 'bond.length'),
+            Alias(MolScript.structureQuery.bondProperty.key, 'bond.key'),
             Alias(MolScript.structureQuery.bondProperty.atomA, 'bond.atom-a'),
             Alias(MolScript.structureQuery.bondProperty.atomB, 'bond.atom-b'),
             Macro(MSymbol('bond.is', Arguments.List(StructureQueryTypes.BondFlag), Type.Bool,

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -99,12 +99,12 @@ const residue = {
     secondary_structure_type: p(l => {
         if (!Unit.isAtomic(l.unit)) notAtomic();
         const secStruc = SecondaryStructureProvider.get(l.structure).value?.get(l.unit.invariantId);
-        return secStruc?.type[l.unit.residueIndex[l.element]] ?? SecondaryStructureType.Flag.NA;
+        return secStruc ? secStruc.type[secStruc.getIndex(l.unit.residueIndex[l.element])] : SecondaryStructureType.Flag.NA;
     }),
     secondary_structure_key: p(l => {
         if (!Unit.isAtomic(l.unit)) notAtomic();
         const secStruc = SecondaryStructureProvider.get(l.structure).value?.get(l.unit.invariantId);
-        return secStruc?.key[l.unit.residueIndex[l.element]] ?? -1;
+        return secStruc ? secStruc.key[secStruc.getIndex(l.unit.residueIndex[l.element])] : -1;
     }),
     chem_comp_type: p(l => !Unit.isAtomic(l.unit) ? notAtomic() : l.unit.model.properties.chemicalComponentMap.get(compId(l))!.type),
 };
@@ -112,9 +112,9 @@ const residue = {
 const chain = {
     key: p(l => !Unit.isAtomic(l.unit) ? notAtomic() : l.unit.chainIndex[l.element]),
 
-    label_asym_id: p(l => !Unit.isAtomic(l.unit) ? notAtomic() : l.unit.model.atomicHierarchy.chains.label_asym_id.value(l.unit.chainIndex[l.element])),
+    label_asym_id: p(l => !Unit.isAtomic(l.unit) ? l.unit.coarseElements.asym_id.value(l.element) : l.unit.model.atomicHierarchy.chains.label_asym_id.value(l.unit.chainIndex[l.element])),
     auth_asym_id: p(l => !Unit.isAtomic(l.unit) ? notAtomic() : l.unit.model.atomicHierarchy.chains.auth_asym_id.value(l.unit.chainIndex[l.element])),
-    label_entity_id: p(l => !Unit.isAtomic(l.unit) ? notAtomic() : l.unit.model.atomicHierarchy.chains.label_entity_id.value(l.unit.chainIndex[l.element]))
+    label_entity_id: p(l => !Unit.isAtomic(l.unit) ? l.unit.coarseElements.entity_id.value(l.element) : l.unit.model.atomicHierarchy.chains.label_entity_id.value(l.unit.chainIndex[l.element]))
 };
 
 const coarse = {
@@ -126,6 +126,7 @@ const coarse = {
     z: atom.z,
 
     asym_id: p(l => !Unit.isCoarse(l.unit) ? notCoarse() : l.unit.coarseElements.asym_id.value(l.element)),
+    entity_id: p(l => !Unit.isCoarse(l.unit) ? notCoarse() : l.unit.coarseElements.entity_id.value(l.element)),
     seq_id_begin: p(l => !Unit.isCoarse(l.unit) ? notCoarse() : l.unit.coarseElements.seq_id_begin.value(l.element)),
     seq_id_end: p(l => !Unit.isCoarse(l.unit) ? notCoarse() : l.unit.coarseElements.seq_id_end.value(l.element)),
 
@@ -160,9 +161,9 @@ const entity = {
     pdbx_mutation: p(l => l.unit.model.entities.data.pdbx_mutation.value(eK(l))),
     pdbx_fragment: p(l => l.unit.model.entities.data.pdbx_fragment.value(eK(l))),
     pdbx_ec: p(l => l.unit.model.entities.data.pdbx_ec.value(eK(l))),
-
+    pdbx_parent_entity_id: p(l => l.unit.model.entities.data.pdbx_parent_entity_id.value(eK(l))),
     subtype: p(l => l.unit.model.entities.subtype.value(eK(l))),
-    prd_id: p(l => l.unit.model.entities.prd_id.value(eK(l))),
+    prd_id: p(l => l.unit.model.entities.prd_id?.value(eK(l)) ?? ''),
 };
 
 const _emptyList: any[] = [];
@@ -172,6 +173,8 @@ const unit = {
     multiChain: p(l => Unit.Traits.is(l.unit.traits, Unit.Trait.MultiChain)),
     object_primitive: p(l => l.unit.objectPrimitive),
     operator_name: p(l => l.unit.conformation.operator.name),
+    instance_id: p(l => l.unit.conformation.operator.instanceId),
+    operator_key: p(l => l.unit.conformation.operator.key),
     model_index: p(l => l.unit.model.modelNum),
     model_label: p(l => l.unit.model.label),
     model_entry_id: p(l => l.unit.model.entryId),

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  */
@@ -15,11 +15,11 @@ import { PluginContext } from '../../mol-plugin/context';
 import { ColorNames } from '../../mol-util/color/names';
 import { createVolumeRepresentationParams } from '../../mol-plugin-state/helpers/volume-representation-params';
 import { StateTransformer } from '../../mol-state';
-import { Theme } from '../../mol-theme/theme';
 import { VolumeRepresentation3DHelpers } from '../../mol-plugin-state/transforms/representation';
 import { AlphaOrbital, Basis, CubeGrid, CubeGridFormat, isCubeGridData } from './data-model';
 import { createSphericalCollocationDensityGrid } from './density';
-import { Tensor } from '../../mol-math/linear-algebra';
+import { Mat4, Tensor } from '../../mol-math/linear-algebra';
+import { Theme } from '../../mol-theme/theme';
 
 export class BasisAndOrbitals extends PluginStateObject.Create<{ basis: Basis, order: SphericalBasisOrder, orbitals: AlphaOrbital[] }>({ name: 'Basis', typeClass: 'Object' }) { }
 
@@ -114,6 +114,7 @@ export const CreateOrbitalVolume = PluginStateTransform.BuiltIn({
             }, a.data.orbitals[params.index], plugin.canvas3d?.webgl).runInContext(ctx);
             const volume: Volume = {
                 grid: data.grid,
+                instances: [{ transform: Mat4.identity() }],
                 sourceData: CubeGridFormat(data),
                 customProperties: new CustomProperties(),
                 _propertyData: Object.create(null),
@@ -146,6 +147,7 @@ export const CreateOrbitalDensityVolume = PluginStateTransform.BuiltIn({
             }, a.data.orbitals, plugin.canvas3d?.webgl).runInContext(ctx);
             const volume: Volume = {
                 grid: data.grid,
+                instances: [{ transform: Mat4.identity() }],
                 sourceData: CubeGridFormat(data),
                 customProperties: new CustomProperties(),
                 _propertyData: Object.create(null),
@@ -166,7 +168,6 @@ export const CreateOrbitalRepresentation3D = PluginStateTransform.BuiltIn({
     from: PluginStateObject.Volume.Data,
     to: PluginStateObject.Volume.Representation3D,
     params: {
-        directVolume: PD.Boolean(false),
         relativeIsovalue: PD.Numeric(1, { min: 0.01, max: 5, step: 0.01 }),
         kind: PD.Select<'positive' | 'negative'>('positive', [['positive', 'Positive'], ['negative', 'Negative']]),
         color: PD.Color(ColorNames.blue),
@@ -183,7 +184,7 @@ export const CreateOrbitalRepresentation3D = PluginStateTransform.BuiltIn({
         return Task.create('Orbitals Representation 3D', async ctx => {
             const params = volumeParams(plugin, a, srcParams);
 
-            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset };
+            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset, errorContext: plugin.errorContext };
             const provider = plugin.representation.volume.registry.get(params.type.name);
             if (provider.ensureCustomProperties) await provider.ensureCustomProperties.attach(propertyCtx, a.data);
             const props = params.type.params || {};
@@ -217,19 +218,7 @@ function volumeParams(plugin: PluginContext, volume: PluginStateObject.Volume.Da
 
     const value = isovalues[params.kind];
 
-    return createVolumeRepresentationParams(plugin, volume.data, params.directVolume ? {
-        type: 'direct-volume',
-        typeParams: {
-            alpha: params.alpha,
-            renderMode: {
-                name: 'isosurface',
-                params: { isoValue: { kind: 'absolute', absoluteValue: (value ?? 1000) * params.relativeIsovalue }, singleLayer: false }
-            },
-            xrayShaded: params.xrayShaded
-        },
-        color: 'uniform',
-        colorParams: { value: params.color }
-    } : {
+    return createVolumeRepresentationParams(plugin, volume.data, {
         type: 'isosurface',
         typeParams: { isoValue: { kind: 'absolute', absoluteValue: (value ?? 1000) * params.relativeIsovalue }, alpha: params.alpha, xrayShaded: params.xrayShaded, tryUseGpu: params.tryUseGpu },
         color: 'uniform',

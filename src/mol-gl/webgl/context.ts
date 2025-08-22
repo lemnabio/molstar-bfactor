@@ -1,22 +1,22 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import { GLRenderingContext, isWebGL2 } from './compat';
-import { checkFramebufferStatus, Framebuffer } from './framebuffer';
+import { checkFramebufferStatus, createNullFramebuffer, Framebuffer } from './framebuffer';
 import { Scheduler } from '../../mol-task';
 import { isDebugMode } from '../../mol-util/debug';
-import { createExtensions, WebGLExtensions } from './extensions';
+import { createExtensions, resetExtensions, WebGLExtensions } from './extensions';
 import { WebGLState, createState } from './state';
-import { PixelData } from '../../mol-util/image';
 import { WebGLResources, createResources } from './resources';
 import { RenderTarget, createRenderTarget } from './render-target';
-import { BehaviorSubject } from 'rxjs';
+import { Subject } from 'rxjs';
 import { now } from '../../mol-util/now';
-import { Texture, TextureFilter } from './texture';
+import { createNullTexture, Texture, TextureFilter } from './texture';
 import { ComputeRenderable } from '../renderable';
+import { createTimer, WebGLTimer } from './timer';
 
 export function getGLContext(canvas: HTMLCanvasElement, attribs?: WebGLContextAttributes & { preferWebGl1?: boolean }): GLRenderingContext | null {
     function get(id: 'webgl' | 'experimental-webgl' | 'webgl2') {
@@ -44,11 +44,21 @@ export function getErrorDescription(gl: GLRenderingContext, error: number) {
     return 'unknown error';
 }
 
-export function checkError(gl: GLRenderingContext) {
+export function checkError(gl: GLRenderingContext, message?: string) {
     const error = gl.getError();
     if (error !== gl.NO_ERROR) {
-        throw new Error(`WebGL error: '${getErrorDescription(gl, error)}'`);
+        throw new Error(`WebGL error: '${getErrorDescription(gl, error)}'${message ? ` (${message})` : ''}`);
     }
+}
+
+export function glEnumToString(gl: GLRenderingContext, value: number) {
+    const keys: string[] = [];
+    for (const key in gl) {
+        if ((gl as any)[key] === value) {
+            keys.push(key);
+        }
+    }
+    return keys.length ? keys.join(' | ') : `0x${value.toString(16)}`;
 }
 
 function unbindResources(gl: GLRenderingContext) {
@@ -76,10 +86,6 @@ function unbindResources(gl: GLRenderingContext) {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
     gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-    unbindFramebuffer(gl);
-}
-
-function unbindFramebuffer(gl: GLRenderingContext) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
@@ -109,7 +115,6 @@ let SentWebglSyncObjectNotSupportedInWebglMessage = false;
 function waitForGpuCommandsComplete(gl: GLRenderingContext): Promise<void> {
     return new Promise(resolve => {
         if (isWebGL2(gl)) {
-            // TODO seems quite slow
             fence(gl, resolve);
         } else {
             if (!SentWebglSyncObjectNotSupportedInWebglMessage) {
@@ -141,35 +146,70 @@ export function readPixels(gl: GLRenderingContext, x: number, y: number, width: 
     if (isDebugMode) checkError(gl);
 }
 
-function getDrawingBufferPixelData(gl: GLRenderingContext) {
-    const w = gl.drawingBufferWidth;
-    const h = gl.drawingBufferHeight;
-    const buffer = new Uint8Array(w * h * 4);
-    unbindFramebuffer(gl);
-    gl.viewport(0, 0, w, h);
-    readPixels(gl, 0, 0, w, h, buffer);
-    return PixelData.flipY(PixelData.create(buffer, w, h));
+function bindDrawingBuffer(gl: GLRenderingContext) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
+
+function getDrawingBufferSize(gl: GLRenderingContext) {
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    return { width, height };
+}
+
+function getShaderPrecisionFormat(gl: GLRenderingContext, shader: 'vertex' | 'fragment', precision: 'low' | 'medium' | 'high', type: 'float' | 'int') {
+    const glShader = shader === 'vertex' ? gl.VERTEX_SHADER : gl.FRAGMENT_SHADER;
+    const glPrecisionType = gl[`${precision.toUpperCase()}_${type.toUpperCase()}` as 'LOW_FLOAT' | 'MEDIUM_FLOAT' | 'HIGH_FLOAT' | 'LOW_INT' | 'MEDIUM_INT' | 'HIGH_INT'];
+    return gl.getShaderPrecisionFormat(glShader, glPrecisionType);
+}
+
+function getShaderPrecisionFormats(gl: GLRenderingContext, shader: 'vertex' | 'fragment') {
+    return {
+        lowFloat: getShaderPrecisionFormat(gl, shader, 'low', 'float'),
+        mediumFloat: getShaderPrecisionFormat(gl, shader, 'medium', 'float'),
+        highFloat: getShaderPrecisionFormat(gl, shader, 'high', 'float'),
+        lowInt: getShaderPrecisionFormat(gl, shader, 'low', 'int'),
+        mediumInt: getShaderPrecisionFormat(gl, shader, 'medium', 'int'),
+        highInt: getShaderPrecisionFormat(gl, shader, 'high', 'int'),
+    };
+}
+
+type WebGLShaderPrecisionFormats = ReturnType<typeof getShaderPrecisionFormats>
 
 //
 
 function createStats() {
-    return {
+    const stats = {
         resourceCounts: {
             attribute: 0,
             elements: 0,
+            pixelPack: 0,
             framebuffer: 0,
             program: 0,
             renderbuffer: 0,
             shader: 0,
             texture: 0,
+            cubeTexture: 0,
             vertexArray: 0,
         },
 
         drawCount: 0,
         instanceCount: 0,
         instancedDrawCount: 0,
+
+        calls: {
+            drawInstanced: 0,
+            drawInstancedBase: 0,
+            multiDrawInstancedBase: 0,
+            counts: 0,
+        },
+
+        culled: {
+            lod: 0,
+            frustum: 0,
+            occlusion: 0,
+        },
     };
+    return stats;
 }
 
 export type WebGLStats = ReturnType<typeof createStats>
@@ -186,17 +226,21 @@ export interface WebGLContext {
     readonly state: WebGLState
     readonly stats: WebGLStats
     readonly resources: WebGLResources
+    readonly timer: WebGLTimer
 
     readonly maxTextureSize: number
     readonly max3dTextureSize: number
     readonly maxRenderbufferSize: number
     readonly maxDrawBuffers: number
     readonly maxTextureImageUnits: number
+    readonly shaderPrecisionFormats: { vertex: WebGLShaderPrecisionFormats, fragment: WebGLShaderPrecisionFormats }
 
     readonly isContextLost: boolean
-    readonly contextRestored: BehaviorSubject<now.Timestamp>
+    readonly contextRestored: Subject<now.Timestamp>
     setContextLost: () => void
     handleContextRestored: (extraResets?: () => void) => void
+
+    setPixelScale: (value: number) => void
 
     /** Cache for compute renderables, managed by consumers */
     readonly namedComputeRenderables: { [name: string]: ComputeRenderable<any> }
@@ -205,22 +249,28 @@ export interface WebGLContext {
     /** Cache for textures, managed by consumers */
     readonly namedTextures: { [name: string]: Texture }
 
-    createRenderTarget: (width: number, height: number, depth?: boolean, type?: 'uint8' | 'float32' | 'fp16', filter?: TextureFilter) => RenderTarget
-    unbindFramebuffer: () => void
+    createRenderTarget: (width: number, height: number, depth?: boolean, type?: 'uint8' | 'float32' | 'fp16', filter?: TextureFilter, format?: 'rgba' | 'alpha') => RenderTarget
+    createDrawTarget: () => RenderTarget
+    bindDrawingBuffer: () => void
+    getDrawingBufferSize: () => { width: number, height: number }
     readPixels: (x: number, y: number, width: number, height: number, buffer: Uint8Array | Float32Array | Int32Array) => void
-    readPixelsAsync: (x: number, y: number, width: number, height: number, buffer: Uint8Array) => Promise<void>
     waitForGpuCommandsComplete: () => Promise<void>
     waitForGpuCommandsCompleteSync: () => void
-    getDrawingBufferPixelData: () => PixelData
+    getFenceSync: () => WebGLSync | null
+    checkSyncStatus: (sync: WebGLSync) => boolean
+    deleteSync: (sync: WebGLSync) => void
     clear: (red: number, green: number, blue: number, alpha: number) => void
+    checkError: (message?: string) => void
+    checkFramebufferStatus: (message?: string) => void
     destroy: (options?: Partial<{ doNotForceWebGLContextLoss: boolean }>) => void
 }
 
 export function createContext(gl: GLRenderingContext, props: Partial<{ pixelScale: number }> = {}): WebGLContext {
     const extensions = createExtensions(gl);
-    const state = createState(gl);
+    const state = createState(gl, extensions);
     const stats = createStats();
     const resources = createResources(gl, state, stats, extensions);
+    const timer = createTimer(gl, extensions, stats);
 
     const parameters = {
         maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
@@ -235,45 +285,24 @@ export function createContext(gl: GLRenderingContext, props: Partial<{ pixelScal
         throw new Error('Need "MAX_VERTEX_TEXTURE_IMAGE_UNITS" >= 8');
     }
 
-    let isContextLost = false;
-    const contextRestored = new BehaviorSubject<now.Timestamp>(0 as now.Timestamp);
+    const shaderPrecisionFormats = {
+        vertex: getShaderPrecisionFormats(gl, 'vertex'),
+        fragment: getShaderPrecisionFormats(gl, 'fragment'),
+    };
 
-    let readPixelsAsync: (x: number, y: number, width: number, height: number, buffer: Uint8Array) => Promise<void>;
-    if (isWebGL2(gl)) {
-        const pbo = gl.createBuffer();
-        let _buffer: Uint8Array | undefined = void 0;
-        let _resolve: (() => void) | undefined = void 0;
-        let _reading = false;
-
-        const bindPBO = () => {
-            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
-            gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, _buffer!);
-            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-            _reading = false;
-            _resolve!();
-            _resolve = void 0;
-            _buffer = void 0;
-        };
-        readPixelsAsync = (x: number, y: number, width: number, height: number, buffer: Uint8Array): Promise<void> => new Promise<void>((resolve, reject) => {
-            if (_reading) {
-                reject('Can not call multiple readPixelsAsync at the same time');
-                return;
-            }
-            _reading = true;
-            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
-            gl.bufferData(gl.PIXEL_PACK_BUFFER, width * height * 4, gl.STREAM_READ);
-            gl.readPixels(x, y, width, height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
-            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-            // need to unbind/bind PBO before/after async awaiting the fence
-            _resolve = resolve;
-            _buffer = buffer;
-            fence(gl, bindPBO);
-        });
-    } else {
-        readPixelsAsync = async (x: number, y: number, width: number, height: number, buffer: Uint8Array) => {
-            readPixels(gl, x, y, width, height, buffer);
-        };
+    if (isDebugMode) {
+        console.log({ parameters, shaderPrecisionFormats });
     }
+
+    // optimize assuming flats first and last data are same or differences don't matter
+    // extension is only available when `FIRST_VERTEX_CONVENTION` is more efficient
+    const epv = extensions.provokingVertex;
+    epv?.provokingVertex(epv.FIRST_VERTEX_CONVENTION);
+
+    let isContextLost = false;
+    const contextRestored = new Subject<now.Timestamp>();
+
+    let pixelScale = props.pixelScale || 1;
 
     const renderTargets = new Set<RenderTarget>();
 
@@ -281,20 +310,22 @@ export function createContext(gl: GLRenderingContext, props: Partial<{ pixelScal
         gl,
         isWebGL2: isWebGL2(gl),
         get pixelRatio() {
-            const dpr = (typeof window !== 'undefined') ? window.devicePixelRatio : 1;
-            return dpr * (props.pixelScale || 1);
+            const dpr = (typeof window !== 'undefined') ? (window.devicePixelRatio || 1) : 1;
+            return dpr * (pixelScale || 1);
         },
 
         extensions,
         state,
         stats,
         resources,
+        timer,
 
         get maxTextureSize() { return parameters.maxTextureSize; },
         get max3dTextureSize() { return parameters.max3dTextureSize; },
         get maxRenderbufferSize() { return parameters.maxRenderbufferSize; },
         get maxDrawBuffers() { return parameters.maxDrawBuffers; },
         get maxTextureImageUnits() { return parameters.maxTextureImageUnits; },
+        get shaderPrecisionFormats() { return shaderPrecisionFormats; },
 
         namedComputeRenderables: Object.create(null),
         namedFramebuffers: Object.create(null),
@@ -306,9 +337,10 @@ export function createContext(gl: GLRenderingContext, props: Partial<{ pixelScal
         contextRestored,
         setContextLost: () => {
             isContextLost = true;
+            timer.clear();
         },
         handleContextRestored: (extraResets?: () => void) => {
-            Object.assign(extensions, createExtensions(gl));
+            resetExtensions(gl, extensions);
 
             state.reset();
             state.currentMaterialId = -1;
@@ -323,8 +355,12 @@ export function createContext(gl: GLRenderingContext, props: Partial<{ pixelScal
             contextRestored.next(now());
         },
 
-        createRenderTarget: (width: number, height: number, depth?: boolean, type?: 'uint8' | 'float32' | 'fp16', filter?: TextureFilter) => {
-            const renderTarget = createRenderTarget(gl, resources, width, height, depth, type, filter);
+        setPixelScale: (value: number) => {
+            pixelScale = value;
+        },
+
+        createRenderTarget: (width: number, height: number, depth?: boolean, type?: 'uint8' | 'float32' | 'fp16', filter?: TextureFilter, format?: 'rgba' | 'alpha') => {
+            const renderTarget = createRenderTarget(gl, resources, width, height, depth, type, filter, format);
             renderTargets.add(renderTarget);
             return {
                 ...renderTarget,
@@ -334,23 +370,63 @@ export function createContext(gl: GLRenderingContext, props: Partial<{ pixelScal
                 }
             };
         },
-        unbindFramebuffer: () => unbindFramebuffer(gl),
+        createDrawTarget: () => {
+            return {
+                id: -1,
+                texture: createNullTexture(gl),
+                framebuffer: createNullFramebuffer(),
+                depthRenderbuffer: null,
+
+                getWidth: () => getDrawingBufferSize(gl).width,
+                getHeight: () => getDrawingBufferSize(gl).height,
+                bind: () => {
+                    bindDrawingBuffer(gl);
+                },
+                setSize: () => {},
+                reset: () => {},
+                destroy: () => {}
+            };
+        },
+        bindDrawingBuffer: () => bindDrawingBuffer(gl),
+        getDrawingBufferSize: () => getDrawingBufferSize(gl),
         readPixels: (x: number, y: number, width: number, height: number, buffer: Uint8Array | Float32Array | Int32Array) => {
             readPixels(gl, x, y, width, height, buffer);
         },
-        readPixelsAsync,
         waitForGpuCommandsComplete: () => waitForGpuCommandsComplete(gl),
         waitForGpuCommandsCompleteSync: () => waitForGpuCommandsCompleteSync(gl),
-        getDrawingBufferPixelData: () => getDrawingBufferPixelData(gl),
+        getFenceSync: () => {
+            return isWebGL2(gl) ? gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) : null;
+        },
+        checkSyncStatus: (sync: WebGLSync) => {
+            if (!isWebGL2(gl)) return true;
+
+            if (gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED) {
+                gl.deleteSync(sync);
+                return true;
+            } else {
+                return false;
+            }
+        },
+        deleteSync: (sync: WebGLSync) => {
+            if (isWebGL2(gl)) gl.deleteSync(sync);
+        },
         clear: (red: number, green: number, blue: number, alpha: number) => {
-            unbindFramebuffer(gl);
+            const drs = getDrawingBufferSize(gl);
+            bindDrawingBuffer(gl);
             state.enable(gl.SCISSOR_TEST);
             state.depthMask(true);
             state.colorMask(true, true, true, true);
             state.clearColor(red, green, blue, alpha);
-            gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-            gl.scissor(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+            state.viewport(0, 0, drs.width, drs.height);
+            state.scissor(0, 0, drs.width, drs.height);
             gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        },
+
+        checkError: (message?: string) => {
+            checkError(gl, message);
+        },
+        checkFramebufferStatus: (message?: string) => {
+            checkFramebufferStatus(gl, message);
         },
 
         destroy: (options?: Partial<{ doNotForceWebGLContextLoss: boolean }>) => {
@@ -358,7 +434,10 @@ export function createContext(gl: GLRenderingContext, props: Partial<{ pixelScal
             unbindResources(gl);
 
             // to aid GC
-            if (!options?.doNotForceWebGLContextLoss) gl.getExtension('WEBGL_lose_context')?.loseContext();
+            if (!options?.doNotForceWebGLContextLoss) {
+                gl.getExtension('WEBGL_lose_context')?.loseContext();
+                gl.getExtension('STACKGL_destroy_context')?.destroy();
+            }
         }
     };
 }

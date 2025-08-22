@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
@@ -27,6 +27,8 @@ import { createEmptyClipping } from '../clipping-data';
 import { RenderableState } from '../../../mol-gl/renderable';
 import { arraySetAdd } from '../../../mol-util/array';
 import { degToRad } from '../../../mol-math/misc';
+import { createEmptySubstance } from '../substance-data';
+import { createEmptyEmissive } from '../emissive-data';
 
 export interface Mesh {
     readonly kind: 'mesh',
@@ -44,6 +46,8 @@ export interface Mesh {
     readonly normalBuffer: ValueCell<Float32Array>,
     /** Group buffer as array of group ids for each vertex wrapped in a value cell */
     readonly groupBuffer: ValueCell<Float32Array>,
+    /** Indicates that group may vary within a triangle, wrapped in a value cell */
+    readonly varyingGroup: ValueCell<boolean>,
 
     /** Bounding sphere of the mesh */
     readonly boundingSphere: Sphere3D
@@ -94,6 +98,7 @@ export namespace Mesh {
             indexBuffer: ValueCell.create(indices),
             normalBuffer: ValueCell.create(normals),
             groupBuffer: ValueCell.create(groups),
+            varyingGroup: ValueCell.create(false),
             get boundingSphere() {
                 const newHash = hashCode(mesh);
                 if (newHash !== currentHash) {
@@ -623,7 +628,11 @@ export namespace Mesh {
         flipSided: PD.Boolean(false, BaseGeometry.ShadingCategory),
         flatShaded: PD.Boolean(false, BaseGeometry.ShadingCategory),
         ignoreLight: PD.Boolean(false, BaseGeometry.ShadingCategory),
-        xrayShaded: PD.Boolean(false, BaseGeometry.ShadingCategory),
+        celShaded: PD.Boolean(false, BaseGeometry.ShadingCategory),
+        xrayShaded: PD.Select<boolean | 'inverted'>(false, [[false, 'Off'], [true, 'On'], ['inverted', 'Inverted']], BaseGeometry.ShadingCategory),
+        transparentBackfaces: PD.Select('off', PD.arrayToOptions(['off', 'on', 'opaque'] as const), BaseGeometry.ShadingCategory),
+        bumpFrequency: PD.Numeric(0, { min: 0, max: 10, step: 0.1 }, BaseGeometry.ShadingCategory),
+        bumpAmplitude: PD.Numeric(1, { min: 0, max: 5, step: 0.1 }, BaseGeometry.ShadingCategory),
     };
     export type Params = typeof Params
 
@@ -644,13 +653,17 @@ export namespace Mesh {
         const instanceCount = transform.instanceCount.ref.value;
         const location = PositionLocation();
         const p = location.position;
-        const v = mesh.vertexBuffer.ref.value;
+        const n = location.normal;
+        const vs = mesh.vertexBuffer.ref.value;
+        const ns = mesh.normalBuffer.ref.value;
         const m = transform.aTransform.ref.value;
         const getLocation = (groupIndex: number, instanceIndex: number) => {
             if (instanceIndex < 0) {
-                Vec3.fromArray(p, v, groupIndex * 3);
+                Vec3.fromArray(p, vs, groupIndex * 3);
+                Vec3.fromArray(n, ns, groupIndex * 3);
             } else {
-                Vec3.transformMat4Offset(p, v, m, 0, groupIndex * 3, instanceIndex * 16);
+                Vec3.transformMat4Offset(p, vs, m, 0, groupIndex * 3, instanceIndex * 16);
+                Vec3.transformDirectionOffset(n, ns, m, 0, groupIndex * 3, instanceIndex * 16);
             }
             return location;
         };
@@ -662,21 +675,28 @@ export namespace Mesh {
         const positionIt = createPositionIterator(mesh, transform);
 
         const color = createColors(locationIt, positionIt, theme.color);
-        const marker = createMarkers(instanceCount * groupCount);
+        const marker = props.instanceGranularity
+            ? createMarkers(instanceCount, 'instance')
+            : createMarkers(instanceCount * groupCount, 'groupInstance');
         const overpaint = createEmptyOverpaint();
         const transparency = createEmptyTransparency();
+        const emissive = createEmptyEmissive();
+        const material = createEmptySubstance();
         const clipping = createEmptyClipping();
 
         const counts = { drawCount: mesh.triangleCount * 3, vertexCount: mesh.vertexCount, groupCount, instanceCount };
 
         const invariantBoundingSphere = Sphere3D.clone(mesh.boundingSphere);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount, 0);
 
         return {
+            dGeometryType: ValueCell.create('mesh'),
+
             aPosition: mesh.vertexBuffer,
             aNormal: mesh.normalBuffer,
             aGroup: mesh.groupBuffer,
             elements: mesh.indexBuffer,
+            dVaryingGroup: mesh.varyingGroup,
             boundingSphere: ValueCell.create(boundingSphere),
             invariantBoundingSphere: ValueCell.create(invariantBoundingSphere),
             uInvariantBoundingSphere: ValueCell.create(Vec4.ofSphere(invariantBoundingSphere)),
@@ -684,15 +704,21 @@ export namespace Mesh {
             ...marker,
             ...overpaint,
             ...transparency,
+            ...emissive,
+            ...material,
             ...clipping,
             ...transform,
 
             ...BaseGeometry.createValues(props, counts),
-            dDoubleSided: ValueCell.create(props.doubleSided),
+            uDoubleSided: ValueCell.create(props.doubleSided),
             dFlatShaded: ValueCell.create(props.flatShaded),
             dFlipSided: ValueCell.create(props.flipSided),
             dIgnoreLight: ValueCell.create(props.ignoreLight),
-            dXrayShaded: ValueCell.create(props.xrayShaded),
+            dCelShaded: ValueCell.create(props.celShaded),
+            dXrayShaded: ValueCell.create(props.xrayShaded === 'inverted' ? 'inverted' : props.xrayShaded === true ? 'on' : 'off'),
+            dTransparentBackfaces: ValueCell.create(props.transparentBackfaces),
+            uBumpFrequency: ValueCell.create(props.bumpFrequency),
+            uBumpAmplitude: ValueCell.create(props.bumpAmplitude),
 
             meta: ValueCell.create(mesh.meta),
         };
@@ -706,16 +732,20 @@ export namespace Mesh {
 
     function updateValues(values: MeshValues, props: PD.Values<Params>) {
         BaseGeometry.updateValues(values, props);
-        ValueCell.updateIfChanged(values.dDoubleSided, props.doubleSided);
+        ValueCell.updateIfChanged(values.uDoubleSided, props.doubleSided);
         ValueCell.updateIfChanged(values.dFlatShaded, props.flatShaded);
         ValueCell.updateIfChanged(values.dFlipSided, props.flipSided);
         ValueCell.updateIfChanged(values.dIgnoreLight, props.ignoreLight);
-        ValueCell.updateIfChanged(values.dXrayShaded, props.xrayShaded);
+        ValueCell.updateIfChanged(values.dCelShaded, props.celShaded);
+        ValueCell.updateIfChanged(values.dXrayShaded, props.xrayShaded === 'inverted' ? 'inverted' : props.xrayShaded === true ? 'on' : 'off');
+        ValueCell.updateIfChanged(values.dTransparentBackfaces, props.transparentBackfaces);
+        ValueCell.updateIfChanged(values.uBumpFrequency, props.bumpFrequency);
+        ValueCell.updateIfChanged(values.uBumpAmplitude, props.bumpAmplitude);
     }
 
     function updateBoundingSphere(values: MeshValues, mesh: Mesh) {
         const invariantBoundingSphere = Sphere3D.clone(mesh.boundingSphere);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value, 0);
 
         if (!Sphere3D.equals(boundingSphere, values.boundingSphere.ref.value)) {
             ValueCell.update(values.boundingSphere, boundingSphere);

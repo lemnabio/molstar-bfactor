@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  */
@@ -20,7 +20,6 @@ import { now, formatTimespan } from '../mol-util/now';
 import { ParamDefinition } from '../mol-util/param-definition';
 import { StateTreeSpine } from './tree/spine';
 import { AsyncQueue } from '../mol-util/async-queue';
-import { isProductionMode } from '../mol-util/debug';
 import { arraySetAdd, arraySetRemove } from '../mol-util/array';
 import { UniqueArray } from '../mol-data/generic';
 import { assignIfUndefined } from '../mol-util/object';
@@ -72,9 +71,9 @@ class State {
 
     tryGetCellData = <T extends StateObject>(ref: StateTransform.Ref) => {
         const ret = this.cells.get(ref)?.obj?.data;
-        if (!ref) throw new Error(`Cell '${ref}' data undefined.`);
-        return ret as T;
-    }
+        if (ret === undefined) throw new Error(`Cell '${ref}' data undefined.`);
+        return ret as T extends StateObject<infer D> ? D : never;
+    };
 
     private historyCapacity = 5;
     private history: [StateTree, string][] = [];
@@ -207,14 +206,18 @@ class State {
                 if (!restored) {
                     restored = true;
                     await this.updateTree(snapshot).runInContext(ctx);
-                    this.events.log.next(LogEntry.error('' + e));
+                    this.events.log.next(LogEntry.error('Error during state transaction, reverting'));
                 }
                 if (isNested) {
                     this.inTransactionError = true;
                     throw e;
                 }
 
-                if (options?.rethrowErrors) throw e;
+                if (options?.rethrowErrors) {
+                    throw e;
+                } else {
+                    console.error(e);
+                }
             } finally {
                 if (!isNested) {
                     this.inTransaction = false;
@@ -378,7 +381,6 @@ class State {
                 definition: {},
                 values: {}
             },
-            paramsNormalizedVersion: root.version,
             dependencies: { dependentBy: [], dependsOn: [] },
             cache: { }
         });
@@ -663,7 +665,6 @@ function addCellsVisitor(transform: StateTransform, _: any, { ctx, added, visite
         state: { ...transform.state },
         errorText: void 0,
         params: void 0,
-        paramsNormalizedVersion: '',
         dependencies: { dependentBy: [], dependsOn: [] },
         cache: void 0
     };
@@ -829,7 +830,7 @@ async function updateSubtree(ctx: UpdateContext, root: Ref) {
         ctx.changed = true;
         if (!ctx.hadError) ctx.newCurrent = root;
         doError(ctx, root, e, false);
-        if (!isProductionMode) console.error(e);
+        console.error(e);
         return;
     }
 
@@ -846,9 +847,9 @@ function resolveParams(ctx: UpdateContext, transform: StateTransform, src: State
     const prms = transform.transformer.definition.params;
     const definition = prms ? prms(src, ctx.parent.globalContext) : {};
 
-    if (cell.paramsNormalizedVersion !== transform.version) {
+    if (transform.version !== (transform as any)._normalized_param_version) {
         (transform.params as any) = ParamDefinition.normalizeParams(definition, transform.params, 'all');
-        cell.paramsNormalizedVersion = transform.version;
+        (transform as any)._normalized_param_version = transform.version;
     } else {
         const defaultValues = ParamDefinition.getDefaultValues(definition);
         (transform.params as any) = transform.params
@@ -865,13 +866,36 @@ async function updateNode(ctx: UpdateContext, currentRef: Ref): Promise<UpdateNo
     const current = ctx.cells.get(currentRef)!;
     const transform = current.transform;
 
-    // special case for Root
+    // Special case for Root
     if (current.transform.ref === StateTransform.RootRef) {
         return { action: 'none' };
     }
 
+    const treeParent = ctx.cells.get(current.transform.parent);
+    const isParentNull = treeParent?.obj === StateObject.Null;
+
+    // Special case for when the immediate parent is null
+    // This could happen then manually applying transforms to
+    // already existing null nudes
+    if (isParentNull) {
+        current.sourceRef = treeParent.transform.ref;
+
+        if (oldTree.transforms.has(currentRef) && current.params) {
+            const oldParams = current.params.values;
+            const oldCache = current.cache;
+            dispose(transform, current.obj, oldParams, oldCache, ctx.parent.globalContext);
+
+            current.params = undefined;
+            current.obj = StateObject.Null;
+            return { ref: currentRef, action: 'updated', obj: current.obj! };
+        } else {
+            current.params = undefined;
+            return { ref: currentRef, action: 'created', obj: StateObject.Null };
+        }
+    }
+
     const parentCell = transform.transformer.definition.from.length === 0
-        ? ctx.cells.get(current.transform.parent)
+        ? treeParent
         : StateSelection.findAncestorOfType(tree, ctx.cells, currentRef, transform.transformer.definition.from);
     if (!parentCell) {
         throw new Error(`No suitable parent found for '${currentRef}'`);

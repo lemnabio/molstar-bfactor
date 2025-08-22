@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2019 Mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 Mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -7,12 +7,12 @@
 
 import { MolScriptSymbolTable as MolScript } from '../../language/symbol-table';
 import { DefaultQueryRuntimeTable, QuerySymbolRuntime, QueryRuntimeArguments } from './base';
-import { Queries, StructureProperties, StructureElement, QueryContext, UnitRing } from '../../../mol-model/structure';
+import { Queries, StructureProperties, StructureElement, QueryContext, UnitRing, Unit } from '../../../mol-model/structure';
 import { ElementSymbol, BondType, SecondaryStructureType } from '../../../mol-model/structure/model/types';
 import { SetUtils } from '../../../mol-util/set';
 import { upperCaseAny } from '../../../mol-util/string';
 import { VdwRadius, AtomWeight, AtomNumber } from '../../../mol-model/structure/model/properties/atomic';
-import { cantorPairing } from '../../../mol-data/util';
+import { cantorPairing, invertCantorPairing, sortedCantorPairing } from '../../../mol-data/util';
 import { bundleElementImpl, bundleGenerator } from '../../../mol-model/structure/query/queries/internal';
 import { arrayEqual } from '../../../mol-util/array';
 
@@ -118,10 +118,16 @@ const symbols = [
         return ret;
     }),
 
+    C(MolScript.core.math.cantorPairing, (ctx, v) => cantorPairing(v[0](ctx), v[1](ctx))),
+    C(MolScript.core.math.sortedCantorPairing, (ctx, v) => sortedCantorPairing(v[0](ctx), v[1](ctx))),
+    C(MolScript.core.math.invertCantorPairing, (ctx, v) => invertCantorPairing([0, 0], v[0](ctx))),
+
     C(MolScript.core.math.floor, (ctx, v) => Math.floor(v[0](ctx))),
     C(MolScript.core.math.ceil, (ctx, v) => Math.ceil(v[0](ctx))),
     C(MolScript.core.math.roundInt, (ctx, v) => Math.round(v[0](ctx))),
+    C(MolScript.core.math.trunc, (ctx, v) => Math.trunc(v[0](ctx))),
     C(MolScript.core.math.abs, (ctx, v) => Math.abs(v[0](ctx))),
+    C(MolScript.core.math.sign, (ctx, v) => Math.sign(v[0](ctx))),
     C(MolScript.core.math.sqrt, (ctx, v) => Math.sqrt(v[0](ctx))),
     C(MolScript.core.math.cbrt, (ctx, v) => Math.cbrt(v[0](ctx))),
     C(MolScript.core.math.sin, (ctx, v) => Math.sin(v[0](ctx))),
@@ -211,21 +217,21 @@ const symbols = [
     // ============= FILTERS ================
     D(MolScript.structureQuery.filter.pick, (ctx, xs) => Queries.filters.pick(xs[0] as any, xs['test'])(ctx)),
     D(MolScript.structureQuery.filter.first, (ctx, xs) => Queries.filters.first(xs[0] as any)(ctx)),
-    D(MolScript.structureQuery.filter.withSameAtomProperties, (ctx, xs) => Queries.filters.withSameAtomProperties(xs[0] as any, xs['source'] as any, xs['property'] as any)(ctx)),
+    D(MolScript.structureQuery.filter.withSameAtomProperties, (ctx, xs) => Queries.filters.withSameAtomProperties(xs[0] as any, xs['source'] as any, xs['property'])(ctx)),
     D(MolScript.structureQuery.filter.intersectedBy, (ctx, xs) => Queries.filters.areIntersectedBy(xs[0] as any, xs['by'] as any)(ctx)),
     D(MolScript.structureQuery.filter.within, (ctx, xs) => Queries.filters.within({
         query: xs[0] as any,
         target: xs['target'] as any,
-        minRadius: xs['min-radius'] as any,
-        maxRadius: xs['max-radius'] as any,
+        minRadius: xs['min-radius']?.(ctx) as any,
+        maxRadius: xs['max-radius']?.(ctx) as any,
         elementRadius: xs['atom-radius'] as any,
-        invert: xs['invert'] as any
+        invert: xs['invert']?.(ctx) as any
     })(ctx)),
     D(MolScript.structureQuery.filter.isConnectedTo, (ctx, xs) => Queries.filters.isConnectedTo({
         query: xs[0] as any,
         target: xs['target'] as any,
-        disjunct: xs['disjunct'] as any,
-        invert: xs['invert'] as any,
+        disjunct: xs['disjunct']?.(ctx) as any,
+        invert: xs['invert']?.(ctx) as any,
         bondTest: xs['bond-test']
     })(ctx)),
 
@@ -247,6 +253,9 @@ const symbols = [
     }),
     D(MolScript.structureQuery.generator.rings, function structureQuery_generator_rings(ctx, xs) {
         return Queries.generators.rings(xs?.['fingerprint']?.(ctx) as any, xs?.['only-aromatic']?.(ctx))(ctx);
+    }),
+    D(MolScript.structureQuery.generator.queryInSelection, function structureQuery_generator_queryInSelection(ctx, xs) {
+        return Queries.generators.querySelection(xs[0] as any, xs['query'] as any, xs['in-complement']?.(ctx) as any)(ctx);
     }),
 
     // ============= MODIFIERS ================
@@ -278,6 +287,7 @@ const symbols = [
             fixedPoint: xs['fixed-point']?.(ctx) ?? false
         })(ctx);
     }),
+    D(MolScript.structureQuery.modifier.intersectBy, function structureQuery_modifier_intersectBy(ctx, xs) { return Queries.modifiers.intersectBy(xs[0] as any, xs['by'] as any)(ctx); }),
 
     // ============= COMBINATORS ================
 
@@ -295,6 +305,8 @@ const symbols = [
     D(MolScript.structureQuery.atomProperty.core.z, atomProp(StructureProperties.atom.z)),
     D(MolScript.structureQuery.atomProperty.core.sourceIndex, atomProp(StructureProperties.atom.sourceIndex)),
     D(MolScript.structureQuery.atomProperty.core.operatorName, atomProp(StructureProperties.unit.operator_name)),
+    D(MolScript.structureQuery.atomProperty.core.instanceId, atomProp(StructureProperties.unit.instance_id)),
+    D(MolScript.structureQuery.atomProperty.core.operatorKey, atomProp(StructureProperties.unit.operator_key)),
     D(MolScript.structureQuery.atomProperty.core.modelIndex, atomProp(StructureProperties.unit.model_index)),
     D(MolScript.structureQuery.atomProperty.core.modelLabel, atomProp(StructureProperties.unit.model_label)),
     D(MolScript.structureQuery.atomProperty.core.atomKey, (ctx, xs) => {
@@ -353,9 +365,51 @@ const symbols = [
     D(MolScript.structureQuery.atomProperty.macromolecular.secondaryStructureFlags, atomProp(StructureProperties.residue.secondary_structure_type)),
     D(MolScript.structureQuery.atomProperty.macromolecular.chemCompType, atomProp(StructureProperties.residue.chem_comp_type)),
 
+    D(MolScript.structureQuery.atomProperty.ihm.hasSeqId, function structureQuery_atomProperty_ihm_hasSeqId(ctx, xs) {
+        const current = ctx.element;
+        const seqId = (xs && xs[0] && xs[0](ctx) as any);
+        if (current.unit.kind === Unit.Kind.Atomic) {
+            return seqId === StructureProperties.residue.label_seq_id(current);
+        }
+        return seqId >= StructureProperties.coarse.seq_id_begin(current) && seqId <= StructureProperties.coarse.seq_id_end(current);
+    }),
+
+    D(MolScript.structureQuery.atomProperty.ihm.overlapsSeqIdRange, function structureQuery_atomProperty_ihm_hasSeqId(ctx, xs) {
+        const current = ctx.element;
+        const beg = (xs && xs.beg && xs.beg(ctx) as any) ?? -Number.MAX_VALUE;
+        const end = (xs && xs.end && xs.end(ctx) as any) ?? Number.MAX_VALUE;
+        if (current.unit.kind === Unit.Kind.Atomic) {
+            const value = StructureProperties.residue.label_seq_id(current);
+            return value >= beg && value <= end;
+        }
+
+        const a = StructureProperties.coarse.seq_id_begin(current);
+        const b = StructureProperties.coarse.seq_id_end(current);
+
+        return (a >= beg && a <= end) || (b >= beg && b <= end) || (a <= beg && b >= end);
+    }),
+
+    // ============= ATOM SET ================
+
+    D(MolScript.structureQuery.atomSet.atomCount,
+        function structureQuery_atomset_atomCount(ctx, xs) {
+	    return Queries.atomset.atomCount(ctx);
+        }),
+
+    D(MolScript.structureQuery.atomSet.countQuery,
+        function structureQuery_atomset_countQuery(ctx, xs) {
+	    return Queries.atomset.countQuery(xs[0] as any)(ctx);
+        }),
+
+    D(MolScript.structureQuery.atomSet.propertySet,
+        function structureQuery_atomset_propertySet(ctx, xs) {
+	  return Queries.atomset.propertySet(xs[0] as any)(ctx);
+        }),
+
     // ============= BOND PROPERTIES ================
     D(MolScript.structureQuery.bondProperty.order, (ctx, xs) => ctx.atomicBond.order),
     D(MolScript.structureQuery.bondProperty.flags, (ctx, xs) => ctx.atomicBond.type),
+    D(MolScript.structureQuery.bondProperty.key, (ctx, xs) => ctx.atomicBond.key),
     D(MolScript.structureQuery.bondProperty.atomA, (ctx, xs) => ctx.atomicBond.a),
     D(MolScript.structureQuery.bondProperty.atomB, (ctx, xs) => ctx.atomicBond.b),
     D(MolScript.structureQuery.bondProperty.length, (ctx, xs) => ctx.atomicBond.length),

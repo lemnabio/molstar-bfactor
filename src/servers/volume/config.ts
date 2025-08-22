@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Sebastian Bittrich <sebastian.bittrich@rcsb.org>
  */
 
 import * as argparse from 'argparse';
@@ -15,7 +16,8 @@ const DefaultServerConfig = {
     defaultPort: 1337,
     shutdownTimeoutMinutes: 24 * 60, /* a day */
     shutdownTimeoutVarianceMinutes: 60,
-    idMap: [] as [string, string][]
+    idMap: [] as [string, string][],
+    healthCheckPath: [] as string[],
 };
 
 function addLimitsArgs(parser: argparse.ArgumentParser) {
@@ -72,14 +74,21 @@ function addServerArgs(parser: argparse.ArgumentParser) {
         action: 'append',
         metavar: ['TYPE', 'PATH'] as any,
         help: [
-            'Map `id`s for a `type` to a file path.',
+            'Map `id`s for a `type` to a file path or URL.',
             'Example: x-ray \'../../data/mdb/xray/${id}-ccp4.mdb\'',
             '',
             '  - JS expressions can be used inside ${}, e.g. \'${id.substr(1, 2)}/${id}.mdb\'',
             '  - Can be specified multiple times.',
             '  - The `TYPE` variable (e.g. `x-ray`) is arbitrary and depends on how you plan to use the server.',
-            '    By default, Mol* Viewer uses `x-ray` and `em`, but any particular use case may vary. '
+            '    By default, Mol* Viewer uses `x-ray` and `em`, but any particular use case may vary. ',
+            '  - If using URL, it can be http://, https://, gs:// or file:// protocol.',
         ].join('\n'),
+    });
+    parser.add_argument('--healthCheckPath', {
+        default: DefaultServerConfig.healthCheckPath,
+        action: 'append',
+        metavar: 'PATH',
+        help: `File path(s) to use for health-checks. Will test if all files are accessible and report a failed health-check if that's not the case.`,
     });
 }
 
@@ -90,7 +99,6 @@ function addJsonConfigArgs(parser: argparse.ArgumentParser) {
             'If a property is not specified, cmd line param/OS variable/default value are used.'
         ].join('\n'),
         required: false,
-        action: 'store_true'
     });
     parser.add_argument('--printCfg', { help: 'Print current config for validation and exit.', required: false, action: 'store_true' });
     parser.add_argument('--cfgTemplate', { help: 'Prints default JSON config template to be modified and exits.', required: false, action: 'store_true' });
@@ -198,13 +206,13 @@ export function configureLocal() {
         description: VOLUME_SERVER_HEADER
     });
     parser.add_argument('--jobs', { help: `Path to a JSON file with job specification.`, required: false });
-    parser.add_argument('--jobsTemplate', { help: 'Print example template for jobs.json and exit.', required: false, nargs: 0 });
+    parser.add_argument('--jobsTemplate', { help: 'Print example template for jobs.json and exit.', required: false, action: 'store_true' });
     addJsonConfigArgs(parser);
     addLimitsArgs(parser);
 
     const config = parser.parse_args() as LimitsConfig & ServerJsonConfig;
 
-    if (config.cfgTemplate !== null) {
+    if (config.cfgTemplate) {
         console.log(JSON.stringify(DefaultLimitsConfig, null, 2));
         process.exit(0);
     }
@@ -217,7 +225,7 @@ export function configureLocal() {
             setLimitsConfig(cfg);
         }
 
-        if (config.printCfg !== null) {
+        if (config.printCfg) {
             console.log(JSON.stringify(LimitsConfig, null, 2));
             process.exit(0);
         }

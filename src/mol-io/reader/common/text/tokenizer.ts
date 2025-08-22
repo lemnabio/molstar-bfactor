@@ -7,11 +7,12 @@
  */
 
 import { chunkedSubtask, RuntimeContext } from '../../../../mol-task';
+import { StringLike } from '../../../common/string-like';
 
 export { Tokenizer };
 
 interface Tokenizer {
-    data: string,
+    data: StringLike,
 
     position: number,
     length: number,
@@ -22,12 +23,12 @@ interface Tokenizer {
 }
 
 export interface Tokens {
-    data: string,
+    data: StringLike,
     count: number,
     indices: ArrayLike<number>
 }
 
-function Tokenizer(data: string): Tokenizer {
+function Tokenizer(data: StringLike): Tokenizer {
     return {
         data,
         position: 0,
@@ -134,7 +135,6 @@ namespace Tokenizer {
 
     /** Advance the state by the given number of lines and return line starts/ends as tokens. */
     export async function readLinesAsync(state: Tokenizer, count: number, ctx: RuntimeContext, initialLineCount = 100000): Promise<Tokens> {
-        const { length } = state;
         const lineTokens = TokenBuilder.create(state.data, count * 2);
 
         let linesAlreadyRead = 0;
@@ -143,7 +143,7 @@ namespace Tokenizer {
             readLinesChunk(state, linesToRead, lineTokens);
             linesAlreadyRead += linesToRead;
             return linesToRead;
-        }, (ctx, state) => ctx.update({ message: 'Parsing...', current: state.position, max: length }));
+        }, (ctx, state) => ctx.update({ message: 'Parsing...', current: state.position, max: state.length }));
 
         return lineTokens;
     }
@@ -167,14 +167,14 @@ namespace Tokenizer {
         return read;
     }
 
-    export async function readAllLinesAsync(data: string, ctx: RuntimeContext, chunkSize = 100000) {
+    export async function readAllLinesAsync(data: StringLike, ctx: RuntimeContext, chunkSize = 100000) {
         const state = Tokenizer(data);
         const tokens = TokenBuilder.create(state.data, Math.max(data.length / 80, 2));
 
         await chunkedSubtask(ctx, chunkSize, state, (chunkSize, state) => {
             readLinesChunkChecked(state, chunkSize, tokens);
             return state.position < state.length ? chunkSize : 0;
-        }, (ctx, state) => ctx.update({ message: 'Parsing...', current: state.position, max: length }));
+        }, (ctx, state) => ctx.update({ message: 'Parsing...', current: state.position, max: state.length }));
 
         return tokens;
     }
@@ -233,6 +233,24 @@ namespace Tokenizer {
         return prev;
     }
 
+    /** Skips all the whitespace */
+    export function skipStrictWhitespace(state: Tokenizer): number {
+        let prev = -1;
+        while (state.position < state.length) {
+            const c = state.data.charCodeAt(state.position);
+            switch (c) {
+                case 9: // '\t'
+                case 32: // ' '
+                    prev = c;
+                    ++state.position;
+                    break;
+                default:
+                    return prev;
+            }
+        }
+        return prev;
+    }
+
     /** Trims spaces and tabs */
     export function trim(state: Tokenizer, start: number, end: number) {
         const { data } = state;
@@ -250,7 +268,7 @@ namespace Tokenizer {
     }
 }
 
-export function trimStr(data: string, start: number, end: number) {
+export function trimStr(data: StringLike, start: number, end: number) {
     let s = start, e = end - 1;
     let c = data.charCodeAt(s);
     while ((c === 9 || c === 32) && s <= e) c = data.charCodeAt(++s);
@@ -294,7 +312,7 @@ export namespace TokenBuilder {
         tokens.count++;
     }
 
-    export function create(data: string, size: number): Tokens {
+    export function create(data: StringLike, size: number): Tokens {
         size = Math.max(10, size);
         return <Builder>{
             data,

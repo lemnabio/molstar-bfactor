@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import { VisualQualityOptions } from '../../../mol-geo/geometry/base';
@@ -14,7 +15,7 @@ import { StateBuilder, StateObjectRef, StateTransformer } from '../../../mol-sta
 import { Task } from '../../../mol-task';
 import { ColorTheme } from '../../../mol-theme/color';
 import { SizeTheme } from '../../../mol-theme/size';
-import { UUID } from '../../../mol-util';
+import { shallowEqual, UUID } from '../../../mol-util';
 import { ColorNames } from '../../../mol-util/color/names';
 import { objectForEach } from '../../../mol-util/object';
 import { ParamDefinition as PD } from '../../../mol-util/param-definition';
@@ -30,6 +31,10 @@ import { Clipping } from '../../../mol-theme/clipping';
 import { setStructureClipping } from '../../helpers/structure-clipping';
 import { setStructureTransparency } from '../../helpers/structure-transparency';
 import { StructureFocusRepresentation } from '../../../mol-plugin/behavior/dynamic/selection/structure-focus-representation';
+import { setStructureSubstance } from '../../helpers/structure-substance';
+import { Material } from '../../../mol-util/material';
+import { Clip } from '../../../mol-util/clip';
+import { setStructureEmissive } from '../../helpers/structure-emissive';
 
 export { StructureComponentManager };
 
@@ -40,7 +45,7 @@ interface StructureComponentManagerState {
 class StructureComponentManager extends StatefulPluginComponent<StructureComponentManagerState> {
     readonly events = {
         optionsUpdated: this.ev<undefined>()
-    }
+    };
 
     get currentStructures() {
         return this.plugin.managers.structure.hierarchy.selection.structures;
@@ -48,6 +53,12 @@ class StructureComponentManager extends StatefulPluginComponent<StructureCompone
 
     get pivotStructure(): StructureRef | undefined {
         return this.currentStructures[0];
+    }
+
+    // To be used only from PluginState.setSnapshot
+    _setSnapshotState(options: StructureComponentManager.Options) {
+        this.updateState({ options });
+        this.events.optionsUpdated.next(void 0);
     }
 
     async setOptions(options: StructureComponentManager.Options) {
@@ -66,23 +77,32 @@ class StructureComponentManager extends StatefulPluginComponent<StructureCompone
         return this.plugin.dataTransaction(async () => {
             await update.commit();
             await this.plugin.state.updateBehavior(StructureFocusRepresentation, p => {
-                p.ignoreHydrogens = !options.showHydrogens;
+                p.ignoreHydrogens = options.hydrogens !== 'all';
+                p.ignoreHydrogensVariant = options.hydrogens === 'only-polar' ? 'non-polar' : 'all';
+                p.ignoreLight = options.ignoreLight;
+                p.material = options.materialStyle;
+                p.clip = options.clipObjects;
             });
             if (interactionChanged) await this.updateInterationProps();
         });
     }
 
     private updateReprParams(update: StateBuilder.Root, component: StructureComponentRef) {
-        const { showHydrogens, visualQuality: quality } = this.state.options;
-        const ignoreHydrogens = !showHydrogens;
+        const { hydrogens, visualQuality: quality, ignoreLight, materialStyle: material, clipObjects: clip } = this.state.options;
+        const ignoreHydrogens = hydrogens !== 'all';
+        const ignoreHydrogensVariant = hydrogens === 'only-polar' ? 'non-polar' : 'all';
         for (const r of component.representations) {
             if (r.cell.transform.transformer !== StructureRepresentation3D) continue;
 
             const params = r.cell.transform.params as StateTransformer.Params<StructureRepresentation3D>;
-            if (!!params.type.params.ignoreHydrogens !== ignoreHydrogens || params.type.params.quality !== quality) {
+            if (!!params.type.params.ignoreHydrogens !== ignoreHydrogens || params.type.params.ignoreHydrogensVariant !== ignoreHydrogensVariant || params.type.params.quality !== quality || params.type.params.ignoreLight !== ignoreLight || !shallowEqual(params.type.params.material, material) || !PD.areEqual(Clip.Params, params.type.params.clip, clip)) {
                 update.to(r.cell).update(old => {
                     old.type.params.ignoreHydrogens = ignoreHydrogens;
+                    old.type.params.ignoreHydrogensVariant = ignoreHydrogensVariant;
                     old.type.params.quality = quality;
+                    old.type.params.ignoreLight = ignoreLight;
+                    old.type.params.material = material;
+                    old.type.params.clip = clip;
                 });
             }
         }
@@ -301,9 +321,10 @@ class StructureComponentManager extends StatefulPluginComponent<StructureCompone
     addRepresentation(components: ReadonlyArray<StructureComponentRef>, type: string) {
         if (components.length === 0) return;
 
-        const { showHydrogens, visualQuality: quality } = this.state.options;
-        const ignoreHydrogens = !showHydrogens;
-        const typeParams = { ignoreHydrogens, quality };
+        const { hydrogens, visualQuality: quality, ignoreLight, materialStyle: material, clipObjects: clip } = this.state.options;
+        const ignoreHydrogens = hydrogens !== 'all';
+        const ignoreHydrogensVariant = hydrogens === 'only-polar' ? 'non-polar' : 'all';
+        const typeParams = { ignoreHydrogens, ignoreHydrogensVariant, quality, ignoreLight, material, clip };
 
         return this.plugin.dataTransaction(async () => {
             for (const component of components) {
@@ -338,9 +359,10 @@ class StructureComponentManager extends StatefulPluginComponent<StructureCompone
             const xs = structures || this.currentStructures;
             if (xs.length === 0) return;
 
-            const { showHydrogens, visualQuality: quality } = this.state.options;
-            const ignoreHydrogens = !showHydrogens;
-            const typeParams = { ignoreHydrogens, quality };
+            const { hydrogens, visualQuality: quality, ignoreLight, materialStyle: material, clipObjects: clip } = this.state.options;
+            const ignoreHydrogens = hydrogens !== 'all';
+            const ignoreHydrogensVariant = hydrogens === 'only-polar' ? 'non-polar' : 'all';
+            const typeParams = { ignoreHydrogens, ignoreHydrogensVariant, quality, ignoreLight, material, clip };
 
             const componentKey = UUID.create22();
             for (const s of xs) {
@@ -372,14 +394,22 @@ class StructureComponentManager extends StatefulPluginComponent<StructureCompone
 
             const getLoci = async (s: Structure) => StructureSelection.toLociWithSourceUnits(await params.selection.getSelection(this.plugin, ctx, s));
             for (const s of xs) {
-                if (params.action.name === 'reset') {
-                    await setStructureOverpaint(this.plugin, s.components, -1, getLoci, params.representations);
-                } else if (params.action.name === 'color') {
+                if (params.action.name === 'color') {
                     const p = params.action.params;
                     await setStructureOverpaint(this.plugin, s.components, p.color, getLoci, params.representations);
+                } else if (params.action.name === 'resetColor') {
+                    await setStructureOverpaint(this.plugin, s.components, -1, getLoci, params.representations);
                 } else if (params.action.name === 'transparency') {
                     const p = params.action.params;
                     await setStructureTransparency(this.plugin, s.components, p.value, getLoci, params.representations);
+                } else if (params.action.name === 'emissive') {
+                    const p = params.action.params;
+                    await setStructureEmissive(this.plugin, s.components, p.value, getLoci, params.representations);
+                } else if (params.action.name === 'material') {
+                    const p = params.action.params;
+                    await setStructureSubstance(this.plugin, s.components, p.material, getLoci, params.representations);
+                } else if (params.action.name === 'resetMaterial') {
+                    await setStructureSubstance(this.plugin, s.components, void 0, getLoci, params.representations);
                 } else if (params.action.name === 'clipping') {
                     const p = params.action.params;
                     await setStructureClipping(this.plugin, s.components, Clipping.Groups.fromNames(p.excludeGroups), getLoci, params.representations);
@@ -443,8 +473,15 @@ class StructureComponentManager extends StatefulPluginComponent<StructureCompone
 
 namespace StructureComponentManager {
     export const OptionsParams = {
-        showHydrogens: PD.Boolean(true, { description: 'Toggle display of hydrogen atoms in representations' }),
+        hydrogens: PD.Select(
+            'all',
+            [['all', 'Show All'], ['hide-all', 'Hide All'], ['only-polar', 'Only Polar']] as const,
+            { description: 'Determine display of hydrogen atoms in representations' }
+        ),
         visualQuality: PD.Select('auto', VisualQualityOptions, { description: 'Control the visual/rendering quality of representations' }),
+        ignoreLight: PD.Boolean(false, { description: 'Ignore light for stylized rendering of representations' }),
+        materialStyle: Material.getParam(),
+        clipObjects: PD.Group(Clip.Params),
         interactions: PD.Group(InteractionsProvider.defaultParams, { label: 'Non-covalent Interactions' }),
     };
     export type Options = PD.Values<typeof OptionsParams>
@@ -477,10 +514,17 @@ namespace StructureComponentManager {
                 color: PD.Group({
                     color: PD.Color(ColorNames.blue, { isExpanded: true }),
                 }, { isFlat: true }),
-                reset: PD.EmptyGroup({ label: 'Reset Color' }),
+                resetColor: PD.EmptyGroup({ label: 'Reset Color' }),
                 transparency: PD.Group({
                     value: PD.Numeric(0.5, { min: 0, max: 1, step: 0.01 }),
                 }, { isFlat: true }),
+                emissive: PD.Group({
+                    value: PD.Numeric(0.5, { min: 0, max: 1, step: 0.01 }),
+                }, { isFlat: true }),
+                material: PD.Group({
+                    material: Material.getParam({ isFlat: true }),
+                }, { isFlat: true }),
+                resetMaterial: PD.EmptyGroup({ label: 'Reset Material' }),
                 clipping: PD.Group({
                     excludeGroups: PD.MultiSelect([] as Clipping.Groups.Names[], PD.objectToOptions(Clipping.Groups.Names)),
                 }, { isFlat: true }),

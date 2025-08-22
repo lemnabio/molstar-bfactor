@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import * as React from 'react';
@@ -12,6 +13,7 @@ import { PluginContext } from '../../mol-plugin/context';
 import { ViewportScreenshotHelper } from '../../mol-plugin/util/viewport-screenshot';
 import { shallowEqual } from '../../mol-util/object';
 import { useBehavior } from '../hooks/use-behavior';
+import { Task } from '../../mol-task';
 
 export interface ScreenshotPreviewProps {
     plugin: PluginContext,
@@ -25,7 +27,7 @@ export interface ScreenshotPreviewProps {
 const _ScreenshotPreview = (props: ScreenshotPreviewProps) => {
     const { plugin, cropFrameColor } = props;
 
-    const helper = plugin.helpers.viewportScreenshot!;
+    const helper = plugin.helpers.viewportScreenshot;
     const [currentCanvas, setCurrentCanvas] = useState<HTMLCanvasElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const propsRef = useRef(props);
@@ -52,7 +54,7 @@ const _ScreenshotPreview = (props: ScreenshotPreviewProps) => {
         function preview() {
             const p = propsRef.current;
             if (!p.suspend && canvasRef.current) {
-                drawPreview(helper, canvasRef.current, p.customBackground, p.borderColor, p.borderWidth);
+                drawPreview(plugin, helper, canvasRef.current, p.customBackground, p.borderColor, p.borderWidth);
             }
 
             if (!canvasRef.current) isDirty = true;
@@ -70,8 +72,8 @@ const _ScreenshotPreview = (props: ScreenshotPreviewProps) => {
         subscribe(plugin.state.data.behaviors.isUpdating, v => {
             if (!v) isDirty = true;
         });
-        subscribe(helper.behaviors.values, () => isDirty = true);
-        subscribe(helper.behaviors.cropParams, () => isDirty = true);
+        subscribe(helper?.behaviors.values, () => isDirty = true);
+        subscribe(helper?.behaviors.cropParams, () => isDirty = true);
 
         let resizeObserver: any = void 0;
         if (typeof ResizeObserver !== 'undefined') {
@@ -92,7 +94,7 @@ const _ScreenshotPreview = (props: ScreenshotPreviewProps) => {
 
     useLayoutEffect(() => {
         if (canvasRef.current) {
-            drawPreview(helper, canvasRef.current, props.customBackground, props.borderColor, props.borderWidth);
+            drawPreview(plugin, helper, canvasRef.current, props.customBackground, props.borderColor, props.borderWidth);
         }
     }, [...Object.values(props)]);
 
@@ -108,52 +110,60 @@ export const ScreenshotPreview = React.memo(_ScreenshotPreview, (prev, next) => 
 
 declare const ResizeObserver: any;
 
-function drawPreview(helper: ViewportScreenshotHelper, target: HTMLCanvasElement, customBackground?: string, borderColor?: string, borderWidth?: number) {
-    const { canvas, width, height } = helper.getPreview()!;
-    const ctx = target.getContext('2d');
-    if (!ctx) return;
+async function drawPreview(plugin: PluginContext, helper: ViewportScreenshotHelper | undefined, target: HTMLCanvasElement, customBackground?: string, borderColor?: string, borderWidth?: number) {
+    const task = Task.create('Render Screenshot', async runtime => {
+        if (!helper) return;
 
-    const w = target.clientWidth;
-    const h = target.clientHeight;
-    target.width = w;
-    target.height = h;
+        const p = await helper.getPreview(runtime)!;
+        if (!p) return;
 
-    ctx.clearRect(0, 0, w, h);
-    const frame = getViewportFrame(width, height, w, h);
+        const ctx = target.getContext('2d');
+        if (!ctx) return;
 
-    if (customBackground) {
-        ctx.fillStyle = customBackground;
-        ctx.fillRect(frame.x, frame.y, frame.width, frame.height);
-    } else if (helper.values.transparent) {
-        // must be an odd number
-        const s = 13;
-        for (let i = 0; i < frame.width; i += s) {
-            for (let j = 0; j < frame.height; j += s) {
-                ctx.fillStyle = (i + j) % 2 ? '#ffffff' : '#bfbfbf';
+        const { canvas, width, height } = p;
+        const w = target.clientWidth;
+        const h = target.clientHeight;
+        target.width = w;
+        target.height = h;
 
-                const x = frame.x + i, y = frame.y + j;
-                const w = i + s > frame.width ? frame.width - i : s;
-                const h = j + s > frame.height ? frame.height - j : s;
-                ctx.fillRect(x, y, w, h);
+        ctx.clearRect(0, 0, w, h);
+        const frame = getViewportFrame(width, height, w, h);
+
+        if (customBackground) {
+            ctx.fillStyle = customBackground;
+            ctx.fillRect(frame.x, frame.y, frame.width, frame.height);
+        } else if (helper.values.transparent) {
+            // must be an odd number
+            const s = 13;
+            for (let i = 0; i < frame.width; i += s) {
+                for (let j = 0; j < frame.height; j += s) {
+                    ctx.fillStyle = (i + j) % 2 ? '#ffffff' : '#bfbfbf';
+
+                    const x = frame.x + i, y = frame.y + j;
+                    const w = i + s > frame.width ? frame.width - i : s;
+                    const h = j + s > frame.height ? frame.height - j : s;
+                    ctx.fillRect(x, y, w, h);
+                }
             }
         }
-    }
-    ctx.drawImage(canvas, frame.x, frame.y, frame.width, frame.height);
+        ctx.drawImage(canvas, frame.x, frame.y, frame.width, frame.height);
 
-    if (borderColor && borderWidth) {
-        const w = borderWidth;
-        ctx.rect(frame.x, frame.y, frame.width, frame.height);
-        ctx.rect(frame.x + w, frame.y + w, frame.width - 2 * w, frame.height - 2 * w);
-        ctx.fillStyle = borderColor;
-        ctx.fill('evenodd');
-    }
+        if (borderColor && borderWidth) {
+            const w = borderWidth;
+            ctx.rect(frame.x, frame.y, frame.width, frame.height);
+            ctx.rect(frame.x + w, frame.y + w, frame.width - 2 * w, frame.height - 2 * w);
+            ctx.fillStyle = borderColor;
+            ctx.fill('evenodd');
+        }
+    });
+    return plugin.runTask(task, { useOverlay: true });
 }
 
 function ViewportFrame({ plugin, canvas, color = 'rgba(255, 87, 45, 0.75)' }: { plugin: PluginContext, canvas: HTMLCanvasElement | null, color?: string }) {
     const helper = plugin.helpers.viewportScreenshot;
-    const params = useBehavior(helper?.behaviors.values!);
-    const cropParams = useBehavior(helper?.behaviors.cropParams!);
-    const crop = useBehavior(helper?.behaviors.relativeCrop!);
+    const params = useBehavior(helper?.behaviors.values);
+    const cropParams = useBehavior(helper?.behaviors.cropParams);
+    const crop = useBehavior(helper?.behaviors.relativeCrop);
     const cropFrameRef = useRef<Viewport>({ x: 0, y: 0, width: 0, height: 0 });
     useBehavior(params?.resolution.name === 'viewport' ? plugin.canvas3d?.resized : void 0);
 
@@ -161,7 +171,7 @@ function ViewportFrame({ plugin, canvas, color = 'rgba(255, 87, 45, 0.75)' }: { 
     const [start, setStart] = useState([0, 0]);
     const [current, setCurrent] = useState([0, 0]);
 
-    if (!helper || !canvas) return null;
+    if (!helper || !canvas || !crop) return null;
 
     const { width, height } = helper.getSizeAndViewport();
 
@@ -267,7 +277,7 @@ function ViewportFrame({ plugin, canvas, color = 'rgba(255, 87, 45, 0.75)' }: { 
 
     function finish() {
         const cropFrame = cropFrameRef.current;
-        if (cropParams.auto) {
+        if (cropParams?.auto) {
             helper?.behaviors.cropParams.next({ ...cropParams, auto: false });
         }
         helper?.behaviors.relativeCrop.next({

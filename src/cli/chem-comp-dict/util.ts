@@ -35,9 +35,9 @@ export async function ensureAvailable(path: string, url: string, forceDownload =
     }
 }
 
-export async function ensureDataAvailable(forceDownload = false) {
-    await ensureAvailable(CCD_PATH, CCD_URL, forceDownload);
-    await ensureAvailable(PVCD_PATH, PVCD_URL, forceDownload);
+export async function ensureDataAvailable(options: DataOptions) {
+    await ensureAvailable(CCD_PATH, options.ccdUrl || CCD_URL, !!options.ccdUrl || options.forceDownload);
+    await ensureAvailable(PVCD_PATH, options.pvcdUrl || PVCD_URL, !!options.pvcdUrl || options.forceDownload);
 }
 
 export async function readFileAsCollection<S extends Database.Schema>(path: string, schema: S) {
@@ -68,8 +68,18 @@ export function getEncodedCif(name: string, database: Database<Database.Schema>,
     return encoder.getData();
 }
 
+export type DataOptions = {
+    ccdUrl?: string,
+    pvcdUrl?: string,
+    forceDownload?: boolean
+}
+
+export const DefaultDataOptions: DataOptions = {
+    forceDownload: false
+};
+
 const DATA_DIR = path.join(__dirname, '..', '..', '..', '..', 'build/data');
 const CCD_PATH = path.join(DATA_DIR, 'components.cif');
 const PVCD_PATH = path.join(DATA_DIR, 'aa-variants-v1.cif');
-const CCD_URL = 'http://ftp.wwpdb.org/pub/pdb/data/monomers/components.cif';
-const PVCD_URL = 'http://ftp.wwpdb.org/pub/pdb/data/monomers/aa-variants-v1.cif';
+const CCD_URL = 'https://files.wwpdb.org/pub/pdb/data/monomers/components.cif';
+const PVCD_URL = 'https://files.wwpdb.org/pub/pdb/data/monomers/aa-variants-v1.cif';

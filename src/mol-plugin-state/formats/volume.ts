@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2022 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Aliaksei Chareshneu <chareshneu.tech@gmail.com>
  */
 
 import { StateTransforms } from '../transforms';
@@ -18,7 +19,6 @@ import { objectForEach } from '../../mol-util/object';
 import { RecommendedIsoValue } from '../../mol-model-formats/volume/property';
 import { getContourLevelEmdb } from '../../mol-plugin/behavior/dynamic/volume-streaming/util';
 import { Task } from '../../mol-task';
-import { DscifFormat } from '../../mol-model-formats/volume/density-server';
 
 export const VolumeFormatCategory = 'Volume';
 type Params = { entryId?: string };
@@ -33,26 +33,18 @@ async function tryObtainRecommendedIsoValue(plugin: PluginContext, volume?: Volu
         try {
             const absIsoLevel = await getContourLevelEmdb(plugin, ctx, entryId);
             RecommendedIsoValue.Provider.set(volume, Volume.IsoValue.absolute(absIsoLevel));
-        } catch (e) { }
+        } catch (e) {
+            console.warn(e);
+        }
     }));
 }
 
 function tryGetRecomendedIsoValue(volume: Volume) {
     const recommendedIsoValue = RecommendedIsoValue.Provider.get(volume);
     if (!recommendedIsoValue) return;
-
     if (recommendedIsoValue.kind === 'relative') return recommendedIsoValue;
 
-    let stats = volume.grid.stats;
-    if (DscifFormat.is(volume.sourceData)) {
-        stats = {
-            min: volume.sourceData.data.volume_data_3d_info.min_source.value(0),
-            max: volume.sourceData.data.volume_data_3d_info.max_source.value(0),
-            mean: volume.sourceData.data.volume_data_3d_info.mean_source.value(0),
-            sigma: volume.sourceData.data.volume_data_3d_info.sigma_source.value(0),
-        };
-    }
-    return Volume.IsoValue.toRelative(recommendedIsoValue, stats);
+    return Volume.adjustedIsoValue(volume, recommendedIsoValue.absoluteValue, 'absolute');
 }
 
 async function defaultVisuals(plugin: PluginContext, data: { volume: StateObjectSelector<PluginStateObject.Volume.Data> }) {
@@ -191,7 +183,6 @@ export const CubeProvider = DataFormatProvider({
     }
 });
 
-
 type DsCifParams = { entryId?: string | string[] };
 
 export const DscifProvider = DataFormatProvider({
@@ -206,16 +197,21 @@ export const DscifProvider = DataFormatProvider({
     parse: async (plugin, data, params?: DsCifParams) => {
         const cifCell = await plugin.build().to(data).apply(StateTransforms.Data.ParseCif).commit();
         const b = plugin.build().to(cifCell);
-        const blocks = cifCell.obj!.data.blocks.slice(1); // zero block contains query meta-data
+        const blocks = cifCell.obj!.data.blocks;
 
-        if (blocks.length !== 1 && blocks.length !== 2) throw new Error('unknown number of blocks');
+        if (blocks.length === 0) throw new Error('no data blocks');
 
         const volumes: StateObjectSelector<PluginStateObject.Volume.Data>[] = [];
         let i = 0;
         for (const block of blocks) {
+            // Skip "server" data block.
+            if (block.header.toUpperCase() === 'SERVER') continue;
+
             const entryId = Array.isArray(params?.entryId) ? params?.entryId[i] : params?.entryId;
-            volumes.push(b.apply(StateTransforms.Volume.VolumeFromDensityServerCif, { blockHeader: block.header, entryId }).selector);
-            i++;
+            if (block.categories['volume_data_3d_info']?.rowCount > 0) {
+                volumes.push(b.apply(StateTransforms.Volume.VolumeFromDensityServerCif, { blockHeader: block.header, entryId }).selector);
+                i++;
+            }
         }
 
         await b.commit();
@@ -250,12 +246,64 @@ export const DscifProvider = DataFormatProvider({
     }
 });
 
+export const SegcifProvider = DataFormatProvider({
+    label: 'Segmentation CIF',
+    description: 'Segmentation CIF',
+    category: VolumeFormatCategory,
+    stringExtensions: ['cif'],
+    binaryExtensions: ['bcif'],
+    isApplicable: (info, data) => {
+        return guessCifVariant(info, data) === 'segcif' ? true : false;
+    },
+    parse: async (plugin, data) => {
+        const cifCell = await plugin.build().to(data).apply(StateTransforms.Data.ParseCif).commit();
+        const b = plugin.build().to(cifCell);
+        const blocks = cifCell.obj!.data.blocks;
+
+        if (blocks.length === 0) throw new Error('no data blocks');
+
+        const volumes: StateObjectSelector<PluginStateObject.Volume.Data>[] = [];
+        for (const block of blocks) {
+            // Skip "server" data block.
+            if (block.header.toUpperCase() === 'SERVER') continue;
+
+            if (block.categories['volume_data_3d_info']?.rowCount > 0) {
+                volumes.push(b.apply(StateTransforms.Volume.VolumeFromSegmentationCif, { blockHeader: block.header }).selector);
+            }
+        }
+
+        await b.commit();
+
+        return { volumes };
+    },
+    visuals: async (plugin, data: { volumes: StateObjectSelector<PluginStateObject.Volume.Data>[] }) => {
+        const { volumes } = data;
+        const tree = plugin.build();
+        const visuals: StateObjectSelector<PluginStateObject.Volume.Representation3D>[] = [];
+
+        if (volumes.length > 0) {
+            const segmentation = Volume.Segmentation.get(volumes[0].data!);
+            if (segmentation) {
+                visuals[visuals.length] = tree
+                    .to(volumes[0])
+                    .apply(StateTransforms.Representation.VolumeRepresentation3D, VolumeRepresentation3DHelpers.getDefaultParams(plugin, 'segment', volumes[0].data!, { alpha: 1, instanceGranularity: true }, 'volume-segment', { }))
+                    .selector;
+            }
+        }
+
+        await tree.commit();
+
+        return visuals;
+    }
+});
+
 export const BuiltInVolumeFormats = [
     ['ccp4', Ccp4Provider] as const,
     ['dsn6', Dsn6Provider] as const,
     ['cube', CubeProvider] as const,
     ['dx', DxProvider] as const,
     ['dscif', DscifProvider] as const,
+    ['segcif', SegcifProvider] as const,
 ] as const;
 
 export type BuildInVolumeFormat = (typeof BuiltInVolumeFormats)[number][0]

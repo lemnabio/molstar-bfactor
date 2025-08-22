@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2019-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Paul Pillot <paul.pillot@tandemai.com>
  */
 
 import { ParamDefinition as PD } from '../../../mol-util/param-definition';
@@ -19,9 +20,13 @@ import { Interval, OrderedSet, SortedArray } from '../../../mol-data/int';
 import { Interactions } from '../interactions/interactions';
 import { InteractionsProvider } from '../interactions';
 import { LocationIterator } from '../../../mol-geo/util/location-iterator';
-import { InteractionFlag } from '../interactions/common';
+import { FeatureType, InteractionFlag, InteractionType } from '../interactions/common';
 import { Unit } from '../../../mol-model/structure/structure';
 import { Sphere3D } from '../../../mol-math/geometry';
+import { assertUnreachable } from '../../../mol-util/type-helpers';
+import { InteractionsSharedParams } from './shared';
+import { eachBondedAtom } from '../chemistry/util';
+import { isHydrogen } from '../../../mol-repr/structure/visual/util/common';
 
 function createInterUnitInteractionCylinderMesh(ctx: VisualContext, structure: Structure, theme: Theme, props: PD.Values<InteractionsInterUnitParams>, mesh?: Mesh) {
     if (!structure.hasAtomic) return Mesh.createEmpty(mesh);
@@ -31,26 +36,70 @@ function createInterUnitInteractionCylinderMesh(ctx: VisualContext, structure: S
     const { contacts, unitsFeatures } = interactions;
 
     const { edgeCount, edges } = contacts;
-    const { sizeFactor } = props;
+    const { sizeFactor, ignoreHydrogens, ignoreHydrogensVariant, parentDisplay } = props;
 
     if (!edgeCount) return Mesh.createEmpty(mesh);
 
     const { child } = structure;
+    const p = Vec3();
+    const pA = Vec3();
+    const pB = Vec3();
 
     const builderProps = {
         linkCount: edgeCount,
         position: (posA: Vec3, posB: Vec3, edgeIndex: number) => {
-            const { unitA, indexA, unitB, indexB } = edges[edgeIndex];
+            const { unitA, indexA, unitB, indexB, props: { type: t } } = edges[edgeIndex];
             const fA = unitsFeatures.get(unitA);
             const fB = unitsFeatures.get(unitB);
-            const uA = structure.unitMap.get(unitA);
-            const uB = structure.unitMap.get(unitB);
+            const uA = structure.unitMap.get(unitA) as Unit.Atomic;
+            const uB = structure.unitMap.get(unitB) as Unit.Atomic;
 
-            Vec3.set(posA, fA.x[indexA], fA.y[indexA], fA.z[indexA]);
-            Vec3.transformMat4(posA, posA, uA.conformation.operator.matrix);
+            if ((!ignoreHydrogens || ignoreHydrogensVariant !== 'all') && (
+                t === InteractionType.HydrogenBond || (t === InteractionType.WeakHydrogenBond && ignoreHydrogensVariant !== 'non-polar'))
+            ) {
+                const idxA = fA.members[fA.offsets[indexA]];
+                const idxB = fB.members[fB.offsets[indexB]];
+                uA.conformation.position(uA.elements[idxA], pA);
+                uB.conformation.position(uB.elements[idxB], pB);
+                let minDistA = Vec3.distance(pA, pB);
+                let minDistB = minDistA;
+                Vec3.copy(posA, pA);
+                Vec3.copy(posB, pB);
+                const donorType = t === InteractionType.HydrogenBond ? FeatureType.HydrogenDonor : FeatureType.WeakHydrogenDonor;
+                const isHydrogenDonorA = fA.types[fA.offsets[indexA]] === donorType;
 
-            Vec3.set(posB, fB.x[indexB], fB.y[indexB], fB.z[indexB]);
-            Vec3.transformMat4(posB, posB, uB.conformation.operator.matrix);
+                if (isHydrogenDonorA) {
+                    eachBondedAtom(structure, uA, idxA, (u, idx) => {
+                        const eI = u.elements[idx];
+                        if (isHydrogen(structure, u, eI, 'all')) {
+                            u.conformation.position(eI, p);
+                            const dist = Vec3.distance(p, pB);
+                            if (dist < minDistA) {
+                                minDistA = dist;
+                                Vec3.copy(posA, p);
+                            }
+                        }
+                    });
+                } else {
+                    eachBondedAtom(structure, uB, idxB, (u, idx) => {
+                        const eI = u.elements[idx];
+                        if (isHydrogen(structure, u, eI, 'all')) {
+                            u.conformation.position(eI, p);
+                            const dist = Vec3.distance(p, pA);
+                            if (dist < minDistB) {
+                                minDistB = dist;
+                                Vec3.copy(posB, p);
+                            }
+                        }
+                    });
+                }
+            } else {
+                Vec3.set(posA, fA.x[indexA], fA.y[indexA], fA.z[indexA]);
+                Vec3.transformMat4(posA, posA, uA.conformation.operator.matrix);
+
+                Vec3.set(posB, fB.x[indexB], fB.y[indexB], fB.z[indexB]);
+                Vec3.transformMat4(posB, posB, uB.conformation.operator.matrix);
+            }
         },
         style: (edgeIndex: number) => LinkStyle.Dashed,
         radius: (edgeIndex: number) => {
@@ -70,24 +119,64 @@ function createInterUnitInteractionCylinderMesh(ctx: VisualContext, structure: S
 
             if (child) {
                 const b = edges[edgeIndex];
-                const childUnitA = child.unitMap.get(b.unitA);
-                if (!childUnitA) return true;
 
-                const unitA = structure.unitMap.get(b.unitA);
-                const fA = unitsFeatures.get(b.unitA);
-                // TODO: check all members
-                const eA = unitA.elements[fA.members[fA.offsets[b.indexA]]];
-                if (!SortedArray.has(childUnitA.elements, eA)) return true;
+                if (parentDisplay === 'stub') {
+                    const childUnitA = child.unitMap.get(b.unitA);
+                    if (!childUnitA) return true;
+
+                    const unitA = structure.unitMap.get(b.unitA);
+                    const { offsets, members } = unitsFeatures.get(b.unitA);
+                    for (let i = offsets[b.indexA], il = offsets[b.indexA + 1]; i < il; ++i) {
+                        const eA = unitA.elements[members[i]];
+                        if (!SortedArray.has(childUnitA.elements, eA)) return true;
+                    }
+                } else if (parentDisplay === 'full' || parentDisplay === 'between') {
+                    let flagA = false;
+                    let flagB = false;
+
+                    const childUnitA = child.unitMap.get(b.unitA);
+                    if (!childUnitA) {
+                        flagA = true;
+                    } else {
+                        const unitA = structure.unitMap.get(b.unitA);
+                        const { offsets, members } = unitsFeatures.get(b.unitA);
+                        for (let i = offsets[b.indexA], il = offsets[b.indexA + 1]; i < il; ++i) {
+                            const eA = unitA.elements[members[i]];
+                            if (!SortedArray.has(childUnitA.elements, eA)) flagA = true;
+                        }
+                    }
+
+                    const childUnitB = child.unitMap.get(b.unitB);
+                    if (!childUnitB) {
+                        flagB = true;
+                    } else {
+                        const unitB = structure.unitMap.get(b.unitB);
+                        const { offsets, members } = unitsFeatures.get(b.unitB);
+                        for (let i = offsets[b.indexB], il = offsets[b.indexB + 1]; i < il; ++i) {
+                            const eB = unitB.elements[members[i]];
+                            if (!SortedArray.has(childUnitB.elements, eB)) flagB = true;
+                        }
+                    }
+
+                    return parentDisplay === 'full' ? flagA && flagB : flagA === flagB;
+                } else {
+                    assertUnreachable(parentDisplay);
+                }
             }
 
             return false;
         }
     };
 
-    const m = createLinkCylinderMesh(ctx, builderProps, props, mesh);
+    const { mesh: m, boundingSphere } = createLinkCylinderMesh(ctx, builderProps, props, mesh);
 
-    const sphere = Sphere3D.expand(Sphere3D(), (child ?? structure).boundary.sphere, 1 * sizeFactor);
-    m.setBoundingSphere(sphere);
+    if (boundingSphere) {
+        m.setBoundingSphere(boundingSphere);
+    } else if (m.triangleCount > 0) {
+        const { child } = structure;
+        const sphere = Sphere3D.expand(Sphere3D(), (child ?? structure).boundary.sphere, 1 * sizeFactor);
+        m.setBoundingSphere(sphere);
+    }
 
     return m;
 }
@@ -95,10 +184,7 @@ function createInterUnitInteractionCylinderMesh(ctx: VisualContext, structure: S
 export const InteractionsInterUnitParams = {
     ...ComplexMeshParams,
     ...LinkCylinderParams,
-    sizeFactor: PD.Numeric(0.3, { min: 0, max: 10, step: 0.01 }),
-    dashCount: PD.Numeric(6, { min: 2, max: 10, step: 2 }),
-    dashScale: PD.Numeric(0.4, { min: 0, max: 2, step: 0.1 }),
-    includeParent: PD.Boolean(false),
+    ...InteractionsSharedParams,
 };
 export type InteractionsInterUnitParams = typeof InteractionsInterUnitParams
 
@@ -115,7 +201,10 @@ export function InteractionsInterUnitVisual(materialId: number): ComplexVisual<I
                 newProps.dashCount !== currentProps.dashCount ||
                 newProps.dashScale !== currentProps.dashScale ||
                 newProps.dashCap !== currentProps.dashCap ||
-                newProps.radialSegments !== currentProps.radialSegments
+                newProps.radialSegments !== currentProps.radialSegments ||
+                newProps.ignoreHydrogens !== currentProps.ignoreHydrogens ||
+                newProps.ignoreHydrogensVariant !== currentProps.ignoreHydrogensVariant ||
+                newProps.parentDisplay !== currentProps.parentDisplay
             );
 
             const interactionsHash = InteractionsProvider.get(newStructure).version;
@@ -144,6 +233,9 @@ function getInteractionLoci(pickingId: PickingId, structure: Structure, id: numb
     return EmptyLoci;
 }
 
+const __unitMap = new Map<number, OrderedSet<StructureElement.UnitIndex>>();
+const __contactIndicesSet = new Set<number>();
+
 function eachInteraction(loci: Loci, structure: Structure, apply: (interval: Interval) => boolean, isMarking: boolean) {
     let changed = false;
     if (Interactions.isLoci(loci)) {
@@ -162,21 +254,48 @@ function eachInteraction(loci: Loci, structure: Structure, apply: (interval: Int
         if (!Structure.areEquivalent(loci.structure, structure)) return false;
         if (isMarking && loci.elements.length === 1) return false; // only a single unit
 
-        const contacts = InteractionsProvider.get(structure).value?.contacts;
-        if (!contacts) return false;
+        const interactions = InteractionsProvider.get(structure).value;
+        if (!interactions) return false;
 
-        // TODO when isMarking, all elements of contact features need to be in the loci
+        const { contacts, unitsFeatures } = interactions;
+
+        for (const e of loci.elements) __unitMap.set(e.unit.id, e.indices);
+
         for (const e of loci.elements) {
             const { unit } = e;
             if (!Unit.isAtomic(unit)) continue;
-            if (isMarking && OrderedSet.size(e.indices) === 1) continue;
 
             OrderedSet.forEach(e.indices, v => {
                 for (const idx of contacts.getContactIndicesForElement(v, unit)) {
-                    if (apply(Interval.ofSingleton(idx))) changed = true;
+                    __contactIndicesSet.add(idx);
                 }
             });
         }
+
+        __contactIndicesSet.forEach(i => {
+            if (isMarking) {
+                const { indexA, unitA, indexB, unitB } = contacts.edges[i];
+
+                const indicesA = __unitMap.get(unitA);
+                const indicesB = __unitMap.get(unitB);
+                if (!indicesA || !indicesB) return;
+
+                const { offsets: offsetsA, members: membersA } = unitsFeatures.get(unitA);
+                for (let j = offsetsA[indexA], jl = offsetsA[indexA + 1]; j < jl; ++j) {
+                    if (!OrderedSet.has(indicesA, membersA[j])) return;
+                }
+
+                const { offsets: offsetsB, members: membersB } = unitsFeatures.get(unitB);
+                for (let j = offsetsB[indexB], jl = offsetsB[indexB + 1]; j < jl; ++j) {
+                    if (!OrderedSet.has(indicesB, membersB[j])) return;
+                }
+            }
+
+            if (apply(Interval.ofSingleton(i))) changed = true;
+        });
+
+        __unitMap.clear();
+        __contactIndicesSet.clear();
     }
     return changed;
 }

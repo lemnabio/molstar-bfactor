@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Neli Fonseca <neli@ebi.ac.uk>
  */
 
 import * as CCP4 from '../../mol-io/reader/ccp4/parser';
@@ -20,15 +21,25 @@ import { Asset } from '../../mol-util/assets';
 import { parseCube } from '../../mol-io/reader/cube/parser';
 import { parseDx } from '../../mol-io/reader/dx/parser';
 import { ColorNames } from '../../mol-util/color/names';
+import { assertUnreachable } from '../../mol-util/type-helpers';
+import { parsePrmtop } from '../../mol-io/reader/prmtop/parser';
+import { parseTop } from '../../mol-io/reader/top/parser';
+import { ungzip } from '../../mol-util/zip/zip';
+import { StringLike } from '../../mol-io/common/string-like';
+import { utf8ReadLong } from '../../mol-io/common/utf8';
+
 
 export { Download };
 export { DownloadBlob };
+export { DeflateData };
 export { RawData };
 export { ReadFile };
 export { ParseBlob };
 export { ParseCif };
 export { ParseCube };
 export { ParsePsf };
+export { ParsePrmtop };
+export { ParseTop };
 export { ParsePly };
 export { ParseCcp4 };
 export { ParseDsn6 };
@@ -129,6 +140,33 @@ const DownloadBlob = PluginStateTransform.BuiltIn({
     // }
 });
 
+type DeflateData = typeof DeflateData
+const DeflateData = PluginStateTransform.BuiltIn({
+    name: 'defalate-data',
+    display: { name: 'Deflate', description: 'Deflate compressed data' },
+    params: {
+        method: PD.Select('gzip', [['gzip', 'gzip']]), // later on we might have to add say brotli
+        isString: PD.Boolean(false),
+        stringEncoding: PD.Optional(PD.Select('utf-8', [['utf-8', 'UTF8']])),
+        label: PD.Optional(PD.Text(''))
+    },
+    from: [SO.Data.Binary],
+    to: [SO.Data.Binary, SO.Data.String]
+})({
+    apply({ a, params }, plugin: PluginContext) {
+        return Task.create('Gzip', async ctx => {
+            const decompressedData = await ungzip(ctx, a.data);
+            const label = params.label ? params.label : a.label;
+            // handle decoding based on stringEncoding param
+            if (params.isString) {
+                const textData = utf8ReadLong(decompressedData);
+                return new SO.Data.String(textData, { label });
+            }
+            return new SO.Data.Binary(decompressedData as Uint8Array, { label });
+        });
+    }
+});
+
 type RawData = typeof RawData
 const RawData = PluginStateTransform.BuiltIn({
     name: 'raw-data',
@@ -151,7 +189,7 @@ const RawData = PluginStateTransform.BuiltIn({
             } else if (p.data instanceof Uint8Array) {
                 return new SO.Data.Binary(p.data, { label: p.label ? p.label : 'Binary' });
             } else {
-                throw new Error('Supplied binary data must be a plain array, ArrayBuffer, or Uint8Array.');
+                assertUnreachable(p.data);
             }
         });
     },
@@ -277,8 +315,9 @@ const ParseCif = PluginStateTransform.BuiltIn({
 })({
     apply({ a }) {
         return Task.create('Parse CIF', async ctx => {
-            const parsed = await (SO.Data.String.is(a) ? CIF.parse(a.data) : CIF.parseBinary(a.data)).runInContext(ctx);
+            const parsed = await (CIF.parse(a.data)).runInContext(ctx);
             if (parsed.isError) throw new Error(parsed.message);
+            if (parsed.result.blocks.length === 0) return StateObject.Null;
             return new SO.Format.Cif(parsed.result);
         });
     }
@@ -312,6 +351,38 @@ const ParsePsf = PluginStateTransform.BuiltIn({
             const parsed = await parsePsf(a.data).runInContext(ctx);
             if (parsed.isError) throw new Error(parsed.message);
             return new SO.Format.Psf(parsed.result);
+        });
+    }
+});
+
+type ParsePrmtop = typeof ParsePrmtop
+const ParsePrmtop = PluginStateTransform.BuiltIn({
+    name: 'parse-prmtop',
+    display: { name: 'Parse PRMTOP', description: 'Parse PRMTOP from String data' },
+    from: [SO.Data.String],
+    to: SO.Format.Prmtop
+})({
+    apply({ a }) {
+        return Task.create('Parse PRMTOP', async ctx => {
+            const parsed = await parsePrmtop(a.data).runInContext(ctx);
+            if (parsed.isError) throw new Error(parsed.message);
+            return new SO.Format.Prmtop(parsed.result);
+        });
+    }
+});
+
+type ParseTop = typeof ParseTop
+const ParseTop = PluginStateTransform.BuiltIn({
+    name: 'parse-top',
+    display: { name: 'Parse TOP', description: 'Parse TOP from String data' },
+    from: [SO.Data.String],
+    to: SO.Format.Top
+})({
+    apply({ a }) {
+        return Task.create('Parse TOP', async ctx => {
+            const parsed = await parseTop(a.data).runInContext(ctx);
+            if (parsed.isError) throw new Error(parsed.message);
+            return new SO.Format.Top(parsed.result);
         });
     }
 });
@@ -439,7 +510,7 @@ const ParseJson = PluginStateTransform.BuiltIn({
 })({
     apply({ a }) {
         return Task.create('Parse JSON', async ctx => {
-            const json = await (new Response(a.data)).json(); // async JSON parsing via fetch API
+            const json = await (new Response(StringLike.toString(a.data))).json(); // async JSON parsing via fetch API
             return new SO.Format.Json(json);
         });
     }

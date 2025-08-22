@@ -1,12 +1,15 @@
 /**
- * Copyright (c) 2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2022 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Adam Midlik <midlik@gmail.com>
  */
 
 import { ParamDefinition as PD } from '../../../mol-util/param-definition';
 import { edt } from '../../../mol-math/geometry/distance-transform';
 import { createTextureImage, TextureImage } from '../../../mol-gl/renderable/util';
+import { RUNNING_IN_NODEJS } from '../../../mol-util/nodejs-shims';
+
 
 const TextAtlasCache: { [k: string]: FontAtlas } = {};
 
@@ -39,35 +42,34 @@ export type FontAtlasMap = {
 }
 
 export class FontAtlas {
-    readonly props: Readonly<FontAtlasProps>
-    readonly mapped: { [k: string]: FontAtlasMap } = {}
-    readonly placeholder: FontAtlasMap
-    readonly texture: TextureImage<Uint8Array>
+    readonly props: Readonly<FontAtlasProps>;
+    readonly mapped: { [k: string]: FontAtlasMap } = {};
+    readonly placeholder: FontAtlasMap;
+    readonly texture: TextureImage<Uint8Array>;
 
-    private scratchW = 0
-    private scratchH = 0
-    private currentX = 0
-    private currentY = 0
-    private readonly scratchData: Uint8Array
+    private scratchW = 0;
+    private scratchH = 0;
+    private currentX = 0;
+    private currentY = 0;
+    private readonly scratchData: Uint8Array;
 
-    private readonly cutoff = 0.5
-    readonly buffer: number
-    private readonly radius: number
+    private readonly cutoff = 0.5;
+    readonly buffer: number;
+    private readonly radius: number;
 
-    private gridOuter: Float64Array
-    private gridInner: Float64Array
-    private f: Float64Array
-    private d: Float64Array
-    private z: Float64Array
-    private v: Int16Array
+    private gridOuter: Float64Array;
+    private gridInner: Float64Array;
+    private f: Float64Array;
+    private d: Float64Array;
+    private z: Float64Array;
+    private v: Int16Array;
 
-    private scratchCanvas: HTMLCanvasElement
-    private scratchContext: CanvasRenderingContext2D
+    private scratchContext: CanvasRenderingContext2D;
 
-    readonly lineHeight: number
+    readonly lineHeight: number;
 
-    private readonly maxWidth: number
-    private readonly middle: number
+    private readonly maxWidth: number;
+    private readonly middle: number;
 
     constructor(props: Partial<FontAtlasProps> = {}) {
         const p = { ...PD.getDefaultValues(FontAtlasParams), ...props };
@@ -84,11 +86,8 @@ export class FontAtlas {
         this.texture = createTextureImage(350 * this.lineHeight * this.maxWidth, 1, Uint8Array);
 
         // prepare scratch canvas
-        this.scratchCanvas = document.createElement('canvas');
-        this.scratchCanvas.width = this.maxWidth;
-        this.scratchCanvas.height = this.lineHeight;
+        this.scratchContext = createCanvasContext(this.maxWidth, this.lineHeight, { willReadFrequently: true })!;
 
-        this.scratchContext = this.scratchCanvas.getContext('2d')!;
         this.scratchContext.font = `${p.fontStyle} ${p.fontVariant} ${p.fontWeight} ${fontSize}px ${p.fontFamily}`;
         this.scratchContext.fillStyle = 'black';
         this.scratchContext.textBaseline = 'middle';
@@ -174,5 +173,29 @@ export class FontAtlas {
 
         this.scratchW = w;
         this.scratchH = h;
+    }
+}
+
+/** Type of imported `canvas` module (not using `typeof import('canvas')` to avoid missing types) */
+type CanvasModule = any;
+let _canvas: CanvasModule | undefined;
+function getCanvasModule(): CanvasModule {
+    if (!_canvas) throw new Error('When running in Node.js and wanting to use Canvas API, call mol-util/data-source\'s setCanvasModule function first and pass imported `canvas` module to it.');
+    return _canvas;
+}
+/** Set `canvas` module, before using Canvas API functionality in NodeJS. Usage: `setCanvasModule(require('canvas')); // some code `*/
+export function setCanvasModule(canvas: CanvasModule) {
+    _canvas = canvas;
+}
+/** Return a newly created canvas context (using a canvas HTML element in browser, canvas module in NodeJS) */
+function createCanvasContext(width: number, height: number, options?: CanvasRenderingContext2DSettings): CanvasRenderingContext2D | null {
+    if (RUNNING_IN_NODEJS) {
+        const canvas = getCanvasModule().createCanvas(width, height);
+        return canvas.getContext('2d', options) as unknown as CanvasRenderingContext2D;
+    } else {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        return canvas.getContext('2d', options);
     }
 }

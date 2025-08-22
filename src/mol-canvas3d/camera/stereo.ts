@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -13,8 +13,8 @@ import { Camera, ICamera } from '../camera';
 import { Viewport } from './util';
 
 export const StereoCameraParams = {
-    eyeSeparation: PD.Numeric(0.064, { min: 0.01, max: 0.5, step: 0.001 }),
-    focus: PD.Numeric(10, { min: 1, max: 100, step: 0.01 }),
+    eyeSeparation: PD.Numeric(0.062, { min: 0.02, max: 0.1, step: 0.001 }, { description: 'Distance between left and right camera.' }),
+    focus: PD.Numeric(10, { min: 1, max: 20, step: 0.1 }, { description: 'Apparent object distance.' }),
 };
 export const DefaultStereoCameraProps = PD.getDefaultValues(StereoCameraParams);
 export type StereoCameraProps = PD.Values<typeof StereoCameraParams>
@@ -33,7 +33,7 @@ class StereoCamera {
         return this.parent.viewOffset;
     }
 
-    private props: StereoCameraProps
+    private props: StereoCameraProps;
 
     constructor(private parent: Camera, props: Partial<StereoCameraProps> = {}) {
         this.props = { ...DefaultStereoCameraProps, ...props };
@@ -61,6 +61,7 @@ class EyeCamera implements ICamera {
     projection = Mat4();
     projectionView = Mat4();
     inverseProjectionView = Mat4();
+    headRotation = Mat4();
     state: Readonly<Camera.Snapshot> = Camera.createDefaultSnapshot();
     viewOffset: Readonly<Camera.ViewOffset> = Camera.ViewOffset();
     far: number = 0;
@@ -69,30 +70,29 @@ class EyeCamera implements ICamera {
     fogNear: number = 0;
 }
 
-const eyeLeft = Mat4.identity(), eyeRight = Mat4.identity();
+const tmpEyeLeft = Mat4.identity();
+const tmpEyeRight = Mat4.identity();
+
+function copyStates(parent: Camera, eye: EyeCamera) {
+    Viewport.copy(eye.viewport, parent.viewport);
+    Mat4.copy(eye.view, parent.view);
+    Mat4.copy(eye.projection, parent.projection);
+    Mat4.copy(eye.headRotation, parent.headRotation);
+    Camera.copySnapshot(eye.state, parent.state);
+    Camera.copyViewOffset(eye.viewOffset, parent.viewOffset);
+    eye.far = parent.far;
+    eye.near = parent.near;
+    eye.fogFar = parent.fogFar;
+    eye.fogNear = parent.fogNear;
+}
+
+//
 
 function update(camera: Camera, props: StereoCameraProps, left: EyeCamera, right: EyeCamera) {
     // Copy the states
 
-    Viewport.copy(left.viewport, camera.viewport);
-    Mat4.copy(left.view, camera.view);
-    Mat4.copy(left.projection, camera.projection);
-    Camera.copySnapshot(left.state, camera.state);
-    Camera.copyViewOffset(left.viewOffset, camera.viewOffset);
-    left.far = camera.far;
-    left.near = camera.near;
-    left.fogFar = camera.fogFar;
-    left.fogNear = camera.fogNear;
-
-    Viewport.copy(right.viewport, camera.viewport);
-    Mat4.copy(right.view, camera.view);
-    Mat4.copy(right.projection, camera.projection);
-    Camera.copySnapshot(right.state, camera.state);
-    Camera.copyViewOffset(right.viewOffset, camera.viewOffset);
-    right.far = camera.far;
-    right.near = camera.near;
-    right.fogFar = camera.fogFar;
-    right.fogNear = camera.fogNear;
+    copyStates(camera, left);
+    copyStates(camera, right);
 
     // update the view offsets
 
@@ -112,8 +112,8 @@ function update(camera: Camera, props: StereoCameraProps, left: EyeCamera, right
 
     // translate xOffset
 
-    eyeLeft[12] = -eyeSepHalf;
-    eyeRight[12] = eyeSepHalf;
+    tmpEyeLeft[12] = -eyeSepHalf;
+    tmpEyeRight[12] = eyeSepHalf;
 
     // for left eye
 
@@ -123,7 +123,7 @@ function update(camera: Camera, props: StereoCameraProps, left: EyeCamera, right
     left.projection[0] = 2 * camera.near / (xmax - xmin);
     left.projection[8] = (xmax + xmin) / (xmax - xmin);
 
-    Mat4.mul(left.view, left.view, eyeLeft);
+    Mat4.mul(left.view, left.view, tmpEyeLeft);
     Mat4.mul(left.projectionView, left.projection, left.view);
     Mat4.invert(left.inverseProjectionView, left.projectionView);
 
@@ -135,7 +135,7 @@ function update(camera: Camera, props: StereoCameraProps, left: EyeCamera, right
     right.projection[0] = 2 * camera.near / (xmax - xmin);
     right.projection[8] = (xmax + xmin) / (xmax - xmin);
 
-    Mat4.mul(right.view, right.view, eyeRight);
+    Mat4.mul(right.view, right.view, tmpEyeRight);
     Mat4.mul(right.projectionView, right.projection, right.view);
     Mat4.invert(right.inverseProjectionView, right.projectionView);
 }

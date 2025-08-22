@@ -1,26 +1,29 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Gianluca Tomasello <giagitom@gmail.com>
  */
 
 import { Viewport } from '../mol-canvas3d/camera/util';
 import { ICamera } from '../mol-canvas3d/camera';
 import { Scene } from './scene';
 import { WebGLContext } from './webgl/context';
-import { Mat4, Vec3, Vec4, Vec2, Quat } from '../mol-math/linear-algebra';
+import { Mat4, Vec3, Vec4, Vec2 } from '../mol-math/linear-algebra';
 import { GraphicsRenderable } from './renderable';
 import { Color } from '../mol-util/color';
 import { ValueCell, deepEqual } from '../mol-util';
 import { GlobalUniformValues } from './renderable/schema';
 import { GraphicsRenderVariant } from './webgl/render-item';
 import { ParamDefinition as PD } from '../mol-util/param-definition';
-import { Clipping } from '../mol-theme/clipping';
-import { stringToWords } from '../mol-util/string';
 import { degToRad } from '../mol-math/misc';
-import { createNullTexture, Texture, Textures } from './webgl/texture';
+import { Texture, Textures } from './webgl/texture';
 import { arrayMapUpsert } from '../mol-util/array';
 import { clamp } from '../mol-math/interpolate';
+import { isTimingMode } from '../mol-util/debug';
+import { Frustum3D } from '../mol-math/geometry/primitives/frustum3d';
+import { Plane3D } from '../mol-math/geometry/primitives/plane3d';
+import { Sphere3D } from '../mol-math/geometry';
 
 export interface RendererStats {
     programCount: number
@@ -38,31 +41,51 @@ export interface RendererStats {
     instancedDrawCount: number
 }
 
+export enum PickType {
+    None = 0,
+    Object = 1,
+    Instance = 2,
+    Group = 3,
+}
+
+export enum MarkingType {
+    None = 0,
+    Depth = 1,
+    Mask = 2,
+}
+
 interface Renderer {
     readonly stats: RendererStats
     readonly props: Readonly<RendererProps>
+    readonly light: Readonly<Light>
+    readonly ambientColor: Vec3
 
-    clear: (toBackgroundColor: boolean) => void
-    clearDepth: () => void
-    update: (camera: ICamera) => void
+    clear: (toBackgroundColor: boolean, ignoreTransparentBackground?: boolean, forceToTransparency?: boolean) => void
+    clearDepth: (packed?: boolean) => void
+    update: (camera: ICamera, scene: Scene) => void
 
-    renderPick: (group: Scene.Group, camera: ICamera, variant: GraphicsRenderVariant, depthTexture: Texture | null) => void
-    renderDepth: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderMarkingDepth: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
+    renderPick: (group: Scene.Group, camera: ICamera, variant: 'pick' | 'depth', pickType: PickType) => void
+    renderDepth: (group: Scene.Group, camera: ICamera) => void
+    renderDepthOpaque: (group: Scene.Group, camera: ICamera) => void
+    renderDepthOpaqueBack: (group: Scene.Group, camera: ICamera) => void
+    renderDepthTransparent: (group: Scene.Group, camera: ICamera, depthTexture: Texture) => void
+    renderMarkingDepth: (group: Scene.Group, camera: ICamera) => void
     renderMarkingMask: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderBlended: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderBlendedOpaque: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderBlendedTransparent: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderBlendedVolumeOpaque: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderBlendedVolumeTransparent: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderWboitOpaque: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
-    renderWboitTransparent: (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => void
+    renderEmissive: (group: Scene.Group, camera: ICamera) => void
+    renderTracing: (group: Scene.Group, camera: ICamera) => void
+    renderBlended: (group: Scene, camera: ICamera) => void
+    renderOpaque: (group: Scene.Group, camera: ICamera) => void
+    renderBlendedTransparent: (group: Scene.Group, camera: ICamera) => void
+    renderVolume: (group: Scene.Group, camera: ICamera, depthTexture: Texture) => void
+    renderWboitTransparent: (group: Scene.Group, camera: ICamera, depthTexture: Texture) => void
+    renderDpoitTransparent: (group: Scene.Group, camera: ICamera, depthTexture: Texture, dpoitTextures: { depth: Texture, frontColor: Texture, backColor: Texture }) => void
 
     setProps: (props: Partial<RendererProps>) => void
     setViewport: (x: number, y: number, width: number, height: number) => void
     setTransparentBackground: (value: boolean) => void
     setDrawingBufferSize: (width: number, height: number) => void
     setPixelRatio: (value: number) => void
+    setOcclusionTest: (f: ((s: Sphere3D) => boolean) | null) => void
 
     dispose: () => void
 }
@@ -70,145 +93,108 @@ interface Renderer {
 export const RendererParams = {
     backgroundColor: PD.Color(Color(0x000000), { description: 'Background color of the 3D canvas' }),
 
-    // the following are general 'material' parameters
     pickingAlphaThreshold: PD.Numeric(0.5, { min: 0.0, max: 1.0, step: 0.01 }, { description: 'The minimum opacity value needed for an object to be pickable.' }),
 
     interiorDarkening: PD.Numeric(0.5, { min: 0.0, max: 1.0, step: 0.01 }),
     interiorColorFlag: PD.Boolean(true, { label: 'Use Interior Color' }),
     interiorColor: PD.Color(Color.fromNormalizedRgb(0.3, 0.3, 0.3)),
 
+    colorMarker: PD.Boolean(true, { description: 'Enable color marker' }),
     highlightColor: PD.Color(Color.fromNormalizedRgb(1.0, 0.4, 0.6)),
     selectColor: PD.Color(Color.fromNormalizedRgb(0.2, 1.0, 0.1)),
-    highlightStrength: PD.Numeric(0.7, { min: 0.0, max: 1.0, step: 0.1 }),
-    selectStrength: PD.Numeric(0.7, { min: 0.0, max: 1.0, step: 0.1 }),
+    dimColor: PD.Color(Color.fromNormalizedRgb(1.0, 1.0, 1.0)),
+    highlightStrength: PD.Numeric(0.3, { min: 0.0, max: 1.0, step: 0.1 }),
+    selectStrength: PD.Numeric(0.3, { min: 0.0, max: 1.0, step: 0.1 }),
+    dimStrength: PD.Numeric(0.0, { min: 0.0, max: 1.0, step: 0.1 }),
     markerPriority: PD.Select(1, [[1, 'Highlight'], [2, 'Select']]),
 
     xrayEdgeFalloff: PD.Numeric(1, { min: 0.0, max: 3.0, step: 0.1 }),
+    celSteps: PD.Numeric(5, { min: 2, max: 16, step: 1 }),
+    exposure: PD.Numeric(1, { min: 0.0, max: 3.0, step: 0.01 }),
 
-    style: PD.MappedStatic('matte', {
-        custom: PD.Group({
-            lightIntensity: PD.Numeric(0.6, { min: 0.0, max: 1.0, step: 0.01 }),
-            ambientIntensity: PD.Numeric(0.4, { min: 0.0, max: 1.0, step: 0.01 }),
-            metalness: PD.Numeric(0.0, { min: 0.0, max: 1.0, step: 0.01 }),
-            roughness: PD.Numeric(1.0, { min: 0.0, max: 1.0, step: 0.01 }),
-            reflectivity: PD.Numeric(0.5, { min: 0.0, max: 1.0, step: 0.01 }),
-        }, { isExpanded: true }),
-        flat: PD.Group({}),
-        matte: PD.Group({}),
-        glossy: PD.Group({}),
-        metallic: PD.Group({}),
-        plastic: PD.Group({}),
-    }, { label: 'Lighting', description: 'Style in which the 3D scene is rendered/lighted' }),
-
-    clip: PD.Group({
-        variant: PD.Select('instance', PD.arrayToOptions<Clipping.Variant>(['instance', 'pixel'])),
-        objects: PD.ObjectList({
-            type: PD.Select('plane', PD.objectToOptions(Clipping.Type, t => stringToWords(t))),
-            invert: PD.Boolean(false),
-            position: PD.Vec3(Vec3()),
-            rotation: PD.Group({
-                axis: PD.Vec3(Vec3.create(1, 0, 0)),
-                angle: PD.Numeric(0, { min: -180, max: 180, step: 1 }, { description: 'Angle in Degrees' }),
-            }, { isExpanded: true }),
-            scale: PD.Vec3(Vec3.create(1, 1, 1)),
-        }, o => stringToWords(o.type))
-    })
+    light: PD.ObjectList({
+        inclination: PD.Numeric(150, { min: 0, max: 180, step: 1 }),
+        azimuth: PD.Numeric(320, { min: 0, max: 360, step: 1 }),
+        color: PD.Color(Color.fromNormalizedRgb(1.0, 1.0, 1.0)),
+        intensity: PD.Numeric(0.6, { min: 0.0, max: 5.0, step: 0.01 }),
+    }, o => Color.toHexString(o.color), { defaultValue: [{
+        inclination: 150,
+        azimuth: 320,
+        color: Color.fromNormalizedRgb(1.0, 1.0, 1.0),
+        intensity: 0.6
+    }] }),
+    ambientColor: PD.Color(Color.fromNormalizedRgb(1.0, 1.0, 1.0)),
+    ambientIntensity: PD.Numeric(0.4, { min: 0.0, max: 2.0, step: 0.01 }),
 };
 export type RendererProps = PD.Values<typeof RendererParams>
 
-export type Style = {
-    lightIntensity: number
-    ambientIntensity: number
-    metalness: number
-    roughness: number
-    reflectivity: number
+export type Light = {
+    count: number
+    direction: number[]
+    color: number[]
 }
 
-export function getStyle(props: RendererProps['style']): Style {
-    switch (props.name) {
-        case 'custom':
-            return props.params as Style;
-        case 'flat':
-            return {
-                lightIntensity: 0, ambientIntensity: 1,
-                metalness: 0, roughness: 0.4, reflectivity: 0.5
-            };
-        case 'matte':
-            return {
-                lightIntensity: 0.7, ambientIntensity: 0.3,
-                metalness: 0, roughness: 1, reflectivity: 0.5
-            };
-        case 'glossy':
-            return {
-                lightIntensity: 0.7, ambientIntensity: 0.3,
-                metalness: 0, roughness: 0.4, reflectivity: 0.5
-            };
-        case 'metallic':
-            return {
-                lightIntensity: 0.7, ambientIntensity: 0.7,
-                metalness: 0.6, roughness: 0.6, reflectivity: 0.5
-            };
-        case 'plastic':
-            return {
-                lightIntensity: 0.7, ambientIntensity: 0.3,
-                metalness: 0, roughness: 0.2, reflectivity: 0.5
-            };
-    }
-}
-
-type Clip = {
-    variant: Clipping.Variant
-    objects: {
-        count: number
-        type: number[]
-        invert: boolean[]
-        position: number[]
-        rotation: number[]
-        scale: number[]
-    }
-}
-
-const tmpQuat = Quat();
-function getClip(props: RendererProps['clip'], clip?: Clip): Clip {
-    const { type, invert, position, rotation, scale } = clip?.objects || {
-        type: (new Array(5)).fill(1),
-        invert: (new Array(5)).fill(false),
-        position: (new Array(5 * 3)).fill(0),
-        rotation: (new Array(5 * 4)).fill(0),
-        scale: (new Array(5 * 3)).fill(1),
+const tmpDir = Vec3();
+const tmpColor = Vec3();
+function getLight(props: RendererProps['light'], light?: Light): Light {
+    const count = props.length;
+    const { direction, color } = light || {
+        direction: (new Array(count * 3)).fill(0),
+        color: (new Array(count * 3)).fill(0),
     };
-    for (let i = 0, il = props.objects.length; i < il; ++i) {
-        const p = props.objects[i];
-        type[i] = Clipping.Type[p.type];
-        invert[i] = p.invert;
-        Vec3.toArray(p.position, position, i * 3);
-        Quat.toArray(Quat.setAxisAngle(tmpQuat, p.rotation.axis, degToRad(p.rotation.angle)), rotation, i * 4);
-        Vec3.toArray(p.scale, scale, i * 3);
+    for (let i = 0; i < count; ++i) {
+        const p = props[i];
+        Vec3.directionFromSpherical(tmpDir, degToRad(p.inclination), degToRad(p.azimuth), 1);
+        Vec3.toArray(tmpDir, direction, i * 3);
+        Vec3.scale(tmpColor, Color.toVec3Normalized(tmpColor, p.color), p.intensity);
+        Vec3.toArray(tmpColor, color, i * 3);
     }
-    return {
-        variant: props.variant,
-        objects: { count: props.objects.length, type, invert, position, rotation, scale }
-    };
+    return { count, direction, color };
+}
+
+export function getTransformedLightDirection(light: Light, t: Mat4): Light['direction'] {
+    const tld = new Array(light.count * 3);
+    for (let i = 0, il = light.count; i < il; ++i) {
+        Vec3.fromArray(tmpDir, light.direction, i * 3);
+        Vec3.transformDirection(tmpDir, tmpDir, t);
+        Vec3.toArray(tmpDir, tld, i * 3);
+    }
+    return tld;
 }
 
 namespace Renderer {
+    const enum Flag {
+        None = 0,
+        BlendedFront = 1,
+        BlendedBack = 2,
+    }
+
+    const enum Mask {
+        All = 0,
+        Opaque = 1,
+        Transparent = 2,
+    }
+
     export function create(ctx: WebGLContext, props: Partial<RendererProps> = {}): Renderer {
-        const { gl, state, stats, extensions: { fragDepth } } = ctx;
+        const { gl, state, stats } = ctx;
         const p = PD.merge(RendererParams, PD.getDefaultValues(RendererParams), props);
-        const style = getStyle(p.style);
-        const clip = getClip(p.clip);
+        const light = getLight(p.light);
 
         const viewport = Viewport();
         const drawingBufferSize = Vec2.create(gl.drawingBufferWidth, gl.drawingBufferHeight);
         const bgColor = Color.toVec3Normalized(Vec3(), p.backgroundColor);
 
         let transparentBackground = false;
+        let isOccluded: ((s: Sphere3D) => boolean) | null = null;
 
-        const nullDepthTexture = createNullTexture(gl);
+        const emptyDepthTexture = ctx.resources.texture('image-uint8', 'rgba', 'ubyte', 'nearest');
+        emptyDepthTexture.define(1, 1);
+        emptyDepthTexture.load({ array: new Uint8Array([255, 255, 255, 255]), width: 1, height: 1 });
         const sharedTexturesList: Textures = [
-            ['tDepth', nullDepthTexture]
+            ['tDepth', emptyDepthTexture]
         ];
 
+        const model = Mat4();
         const view = Mat4();
         const invView = Mat4();
         const modelView = Mat4();
@@ -216,11 +202,23 @@ namespace Renderer {
         const invProjection = Mat4();
         const modelViewProjection = Mat4();
         const invModelViewProjection = Mat4();
+        const invHeadRotation = Mat4();
 
         const cameraDir = Vec3();
+        const cameraPosition = Vec3();
+        const cameraPlane = Plane3D();
         const viewOffset = Vec2();
+        const frustum = Frustum3D();
+
+        let modelScale = 1;
+        const boundingSphere = Sphere3D();
+
+        const ambientColor = Vec3();
+        Vec3.scale(ambientColor, Color.toArrayNormalized(p.ambientColor, ambientColor, 0), p.ambientIntensity);
 
         const globalUniforms: GlobalUniformValues = {
+            uDrawId: ValueCell.create(0),
+
             uModel: ValueCell.create(Mat4.identity()),
             uView: ValueCell.create(view),
             uInvView: ValueCell.create(invView),
@@ -230,40 +228,37 @@ namespace Renderer {
             uProjection: ValueCell.create(Mat4()),
             uModelViewProjection: ValueCell.create(modelViewProjection),
             uInvModelViewProjection: ValueCell.create(invModelViewProjection),
+            uHasHeadRotation: ValueCell.create(false),
+            uInvHeadRotation: ValueCell.create(invHeadRotation),
 
             uIsOrtho: ValueCell.create(1),
             uViewOffset: ValueCell.create(viewOffset),
+            uModelScale: ValueCell.create(1),
 
             uPixelRatio: ValueCell.create(ctx.pixelRatio),
             uViewport: ValueCell.create(Viewport.toVec4(Vec4(), viewport)),
             uDrawingBufferSize: ValueCell.create(drawingBufferSize),
 
-            uCameraPosition: ValueCell.create(Vec3()),
+            uCameraPosition: ValueCell.create(cameraPosition),
             uCameraDir: ValueCell.create(cameraDir),
+            uCameraPlane: ValueCell.create(Plane3D.toArray(cameraPlane, Vec4(), 0)),
             uNear: ValueCell.create(1),
             uFar: ValueCell.create(10000),
+            uFog: ValueCell.create(true),
             uFogNear: ValueCell.create(1),
             uFogFar: ValueCell.create(10000),
             uFogColor: ValueCell.create(bgColor),
 
-            uRenderWboit: ValueCell.create(false),
+            uRenderMask: ValueCell.create(0),
             uMarkingDepthTest: ValueCell.create(false),
+            uPickType: ValueCell.create(PickType.None),
+            uMarkingType: ValueCell.create(MarkingType.None),
 
             uTransparentBackground: ValueCell.create(false),
 
-            uClipObjectType: ValueCell.create(clip.objects.type),
-            uClipObjectInvert: ValueCell.create(clip.objects.invert),
-            uClipObjectPosition: ValueCell.create(clip.objects.position),
-            uClipObjectRotation: ValueCell.create(clip.objects.rotation),
-            uClipObjectScale: ValueCell.create(clip.objects.scale),
-
-            // the following are general 'material' uniforms
-            uLightIntensity: ValueCell.create(style.lightIntensity),
-            uAmbientIntensity: ValueCell.create(style.ambientIntensity),
-
-            uMetalness: ValueCell.create(style.metalness),
-            uRoughness: ValueCell.create(style.roughness),
-            uReflectivity: ValueCell.create(style.reflectivity),
+            uLightDirection: ValueCell.create(light.direction),
+            uLightColor: ValueCell.create(light.color),
+            uAmbientColor: ValueCell.create(ambientColor),
 
             uPickingAlphaThreshold: ValueCell.create(p.pickingAlphaThreshold),
 
@@ -273,38 +268,69 @@ namespace Renderer {
 
             uHighlightColor: ValueCell.create(Color.toVec3Normalized(Vec3(), p.highlightColor)),
             uSelectColor: ValueCell.create(Color.toVec3Normalized(Vec3(), p.selectColor)),
+            uDimColor: ValueCell.create(Color.toVec3Normalized(Vec3(), p.dimColor)),
             uHighlightStrength: ValueCell.create(p.highlightStrength),
             uSelectStrength: ValueCell.create(p.selectStrength),
+            uDimStrength: ValueCell.create(p.dimStrength),
             uMarkerPriority: ValueCell.create(p.markerPriority),
+            uMarkerAverage: ValueCell.create(0),
 
             uXrayEdgeFalloff: ValueCell.create(p.xrayEdgeFalloff),
+            uCelSteps: ValueCell.create(p.celSteps),
+            uExposure: ValueCell.create(p.exposure),
         };
         const globalUniformList = Object.entries(globalUniforms);
 
         let globalUniformsNeedUpdate = true;
 
-        const renderObject = (r: GraphicsRenderable, variant: GraphicsRenderVariant) => {
-            if (r.state.disposed || !r.state.visible || (!r.state.pickable && variant[0] === 'p')) {
+        const renderObject = (r: GraphicsRenderable, variant: GraphicsRenderVariant, flag: Flag) => {
+            if (r.state.disposed || !r.state.visible || (!r.state.pickable && variant === 'pick')) {
                 return;
             }
 
-            let definesNeedUpdate = false;
-            if (r.state.noClip) {
-                if (r.values.dClipObjectCount.ref.value !== 0) {
-                    ValueCell.update(r.values.dClipObjectCount, 0);
-                    definesNeedUpdate = true;
+            if (!r.values.drawCount.ref.value) {
+                return;
+            }
+
+            Sphere3D.scaleNX(boundingSphere, r.values.boundingSphere.ref.value, modelScale);
+
+            if (!Frustum3D.intersectsSphere3D(frustum, boundingSphere)) {
+                return;
+            }
+
+            const [minDistance, maxDistance] = r.values.uLod.ref.value;
+            if (minDistance !== 0 || maxDistance !== 0) {
+                const { center, radius } = boundingSphere;
+                const d = Plane3D.distanceToPoint(cameraPlane, center);
+                if (d + radius < minDistance * modelScale) return;
+                if (d - radius > maxDistance * modelScale) return;
+            }
+
+            const unscaled = modelScale === 1;
+            if (unscaled) {
+                if (isOccluded !== null && isOccluded(boundingSphere)) {
+                    return;
                 }
-            } else {
-                if (r.values.dClipObjectCount.ref.value !== clip.objects.count) {
-                    ValueCell.update(r.values.dClipObjectCount, clip.objects.count);
-                    definesNeedUpdate = true;
-                }
-                if (r.values.dClipVariant.ref.value !== clip.variant) {
-                    ValueCell.update(r.values.dClipVariant, clip.variant);
-                    definesNeedUpdate = true;
+
+                const hasInstanceGrid = r.values.instanceGrid.ref.value.cellSize > 0;
+                const hasMultipleInstances = r.values.uInstanceCount.ref.value > 1;
+                if (hasInstanceGrid && (hasMultipleInstances || r.values.lodLevels)) {
+                    r.cull(cameraPlane, frustum, isOccluded, ctx.stats);
+                } else {
+                    r.uncull();
                 }
             }
-            if (definesNeedUpdate) r.update();
+
+            let needUpdate = false;
+            if (r.values.dLightCount.ref.value !== light.count) {
+                ValueCell.update(r.values.dLightCount, light.count);
+                needUpdate = true;
+            }
+            if (r.values.dColorMarker.ref.value !== p.colorMarker) {
+                ValueCell.update(r.values.dColorMarker, p.colorMarker);
+                needUpdate = true;
+            }
+            if (needUpdate) r.update();
 
             const program = r.getProgram(variant);
             if (state.currentProgramId !== program.id) {
@@ -316,28 +342,39 @@ namespace Renderer {
             if (globalUniformsNeedUpdate) {
                 // console.log('globalUniformsNeedUpdate')
                 program.setUniforms(globalUniformList);
+                program.bindTextures(sharedTexturesList, 0);
                 globalUniformsNeedUpdate = false;
             }
 
-            if (r.values.dRenderMode) { // indicates direct-volume
+            if (r.values.dGeometryType.ref.value === 'directVolume') {
+                if (variant !== 'color') {
+                    return; // only color supported
+                }
+
                 // culling done in fragment shader
                 state.disable(gl.CULL_FACE);
                 state.frontFace(gl.CCW);
-
-                if (variant === 'colorBlended') {
-                    // depth test done manually in shader against `depthTexture`
-                    // still need to enable when fragDepth can be used to write depth
-                    if (r.values.dRenderMode.ref.value === 'volume' || !fragDepth) {
-                        state.disable(gl.DEPTH_TEST);
-                        state.depthMask(false);
-                    } else {
-                        state.enable(gl.DEPTH_TEST);
-                        state.depthMask(r.values.uAlpha.ref.value === 1.0);
-                    }
+            } else if (flag === Flag.BlendedFront) {
+                state.enable(gl.CULL_FACE);
+                if (r.values.dFlipSided?.ref.value) {
+                    state.frontFace(gl.CW);
+                    state.cullFace(gl.FRONT);
+                } else {
+                    state.frontFace(gl.CCW);
+                    state.cullFace(gl.BACK);
+                }
+            } else if (flag === Flag.BlendedBack) {
+                state.enable(gl.CULL_FACE);
+                if (r.values.dFlipSided?.ref.value) {
+                    state.frontFace(gl.CW);
+                    state.cullFace(gl.BACK);
+                } else {
+                    state.frontFace(gl.CCW);
+                    state.cullFace(gl.FRONT);
                 }
             } else {
-                if (r.values.dDoubleSided) {
-                    if (r.values.dDoubleSided.ref.value || r.values.hasReflection.ref.value) {
+                if (r.values.uDoubleSided) {
+                    if (r.values.uDoubleSided.ref.value || r.values.hasReflection.ref.value) {
                         state.disable(gl.CULL_FACE);
                     } else {
                         state.enable(gl.CULL_FACE);
@@ -347,14 +384,9 @@ namespace Renderer {
                     state.disable(gl.CULL_FACE);
                 }
 
-                if (r.values.dFlipSided) {
-                    if (r.values.dFlipSided.ref.value) {
-                        state.frontFace(gl.CW);
-                        state.cullFace(gl.FRONT);
-                    } else {
-                        state.frontFace(gl.CCW);
-                        state.cullFace(gl.BACK);
-                    }
+                if (r.values.dFlipSided?.ref.value) {
+                    state.frontFace(gl.CW);
+                    state.cullFace(gl.FRONT);
                 } else {
                     // webgl default
                     state.frontFace(gl.CCW);
@@ -362,10 +394,10 @@ namespace Renderer {
                 }
             }
 
-            r.render(variant, sharedTexturesList);
+            r.render(variant, sharedTexturesList.length);
         };
 
-        const update = (camera: ICamera) => {
+        const update = (camera: ICamera, scene: Scene) => {
             ValueCell.update(globalUniforms.uView, camera.view);
             ValueCell.update(globalUniforms.uInvView, Mat4.invert(invView, camera.view));
             ValueCell.update(globalUniforms.uProjection, camera.projection);
@@ -373,236 +405,382 @@ namespace Renderer {
 
             ValueCell.updateIfChanged(globalUniforms.uIsOrtho, camera.state.mode === 'orthographic' ? 1 : 0);
             ValueCell.update(globalUniforms.uViewOffset, camera.viewOffset.enabled ? Vec2.set(viewOffset, camera.viewOffset.offsetX * 16, camera.viewOffset.offsetY * 16) : Vec2.set(viewOffset, 0, 0));
+            ValueCell.updateIfChanged(globalUniforms.uModelScale, camera.state.scale);
 
-            ValueCell.update(globalUniforms.uCameraPosition, camera.state.position);
-            ValueCell.update(globalUniforms.uCameraDir, Vec3.normalize(cameraDir, Vec3.sub(cameraDir, camera.state.target, camera.state.position)));
+            ValueCell.update(globalUniforms.uCameraPosition, Mat4.getTranslation(cameraPosition, invView));
+            const cameraTarget = Vec3.scale(Vec3(), camera.state.target, camera.state.scale);
+            Vec3.normalize(cameraDir, Vec3.sub(cameraDir, cameraTarget, cameraPosition));
+            ValueCell.update(globalUniforms.uCameraDir, cameraDir);
 
             ValueCell.updateIfChanged(globalUniforms.uFar, camera.far);
             ValueCell.updateIfChanged(globalUniforms.uNear, camera.near);
+            ValueCell.updateIfChanged(globalUniforms.uFog, camera.state.fog > 0);
             ValueCell.updateIfChanged(globalUniforms.uFogFar, camera.fogFar);
             ValueCell.updateIfChanged(globalUniforms.uFogNear, camera.fogNear);
             ValueCell.updateIfChanged(globalUniforms.uTransparentBackground, transparentBackground);
+
+            Frustum3D.fromProjectionMatrix(frustum, camera.projectionView);
+
+            Plane3D.copy(cameraPlane, frustum[Frustum3D.PlaneIndex.Near]);
+            cameraPlane.constant -= Plane3D.distanceToPoint(cameraPlane, cameraPosition);
+            ValueCell.update(globalUniforms.uCameraPlane, Plane3D.toArray(cameraPlane, globalUniforms.uCameraPlane.ref.value, 0));
+
+            ValueCell.updateIfChanged(globalUniforms.uMarkerAverage, scene.markerAverage);
+
+            const hasHeadRotation = !Mat4.isZero(camera.headRotation);
+            if (hasHeadRotation) {
+                ValueCell.updateIfChanged(globalUniforms.uHasHeadRotation, hasHeadRotation);
+                ValueCell.update(globalUniforms.uInvHeadRotation, Mat4.invert(invHeadRotation, camera.headRotation));
+                ValueCell.update(globalUniforms.uLightDirection, getTransformedLightDirection(light, invHeadRotation));
+            } else {
+                ValueCell.update(globalUniforms.uHasHeadRotation, false);
+                ValueCell.update(globalUniforms.uInvHeadRotation, Mat4.id);
+                ValueCell.update(globalUniforms.uLightDirection, light.direction);
+            }
         };
 
-        const updateInternal = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null, renderWboit: boolean, markingDepthTest: boolean) => {
-            arrayMapUpsert(sharedTexturesList, 'tDepth', depthTexture || nullDepthTexture);
+        const updateInternal = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null, renderMask: Mask, markingDepthTest: boolean) => {
+            arrayMapUpsert(sharedTexturesList, 'tDepth', depthTexture || emptyDepthTexture);
 
-            ValueCell.update(globalUniforms.uModel, group.view);
-            ValueCell.update(globalUniforms.uModelView, Mat4.mul(modelView, group.view, camera.view));
+            modelScale = camera.state.scale;
+
+            ValueCell.update(globalUniforms.uModel, Mat4.scaleUniformly(model, group.view, camera.state.scale));
+            ValueCell.update(globalUniforms.uModelView, Mat4.mul(modelView, camera.view, model));
             ValueCell.update(globalUniforms.uInvModelView, Mat4.invert(invModelView, modelView));
             ValueCell.update(globalUniforms.uModelViewProjection, Mat4.mul(modelViewProjection, modelView, camera.projection));
             ValueCell.update(globalUniforms.uInvModelViewProjection, Mat4.invert(invModelViewProjection, modelViewProjection));
 
-            ValueCell.updateIfChanged(globalUniforms.uRenderWboit, renderWboit);
+            ValueCell.updateIfChanged(globalUniforms.uRenderMask, renderMask);
             ValueCell.updateIfChanged(globalUniforms.uMarkingDepthTest, markingDepthTest);
 
             state.enable(gl.SCISSOR_TEST);
             state.colorMask(true, true, true, true);
 
             const { x, y, width, height } = viewport;
-            gl.viewport(x, y, width, height);
-            gl.scissor(x, y, width, height);
+            state.viewport(x, y, width, height);
+            state.scissor(x, y, width, height);
 
             globalUniformsNeedUpdate = true;
             state.currentRenderItemId = -1;
         };
 
-        const renderPick = (group: Scene.Group, camera: ICamera, variant: GraphicsRenderVariant, depthTexture: Texture | null) => {
+        const checkOpaque = function (r: GraphicsRenderable) {
+            // uAlpha is updated in `r.render` so we need to recompute it here
+            const alpha = clamp(r.values.alpha.ref.value * r.state.alphaFactor, 0, 1);
+            const xrayShaded = r.values.dXrayShaded?.ref.value === 'on' || r.values.dXrayShaded?.ref.value === 'inverted';
+            return (
+                (alpha === 1 &&
+                    r.values.transparencyAverage.ref.value !== 1 &&
+                    r.values.dGeometryType.ref.value !== 'directVolume' &&
+                    r.values.dPointStyle?.ref.value !== 'fuzzy' &&
+                    !xrayShaded
+                ) || r.values.dTransparentBackfaces?.ref.value === 'opaque'
+            );
+        };
+
+        const checkTransparent = function (r: GraphicsRenderable) {
+            // uAlpha is updated in `r.render` so we need to recompute it here
+            const alpha = clamp(r.values.alpha.ref.value * r.state.alphaFactor, 0, 1);
+            const xrayShaded = r.values.dXrayShaded?.ref.value === 'on' || r.values.dXrayShaded?.ref.value === 'inverted';
+            return (
+                (alpha < 1 && alpha !== 0) ||
+                r.values.transparencyAverage.ref.value > 0 ||
+                r.values.dGeometryType.ref.value === 'directVolume' ||
+                r.values.dPointStyle?.ref.value === 'fuzzy' ||
+                r.values.dGeometryType.ref.value === 'text' ||
+                r.values.dGeometryType.ref.value === 'image' ||
+                xrayShaded
+            );
+        };
+
+        const renderPick = (group: Scene.Group, camera: ICamera, variant: GraphicsRenderVariant, pickType: PickType) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderPick');
             state.disable(gl.BLEND);
             state.enable(gl.DEPTH_TEST);
             state.depthMask(true);
 
-            updateInternal(group, camera, depthTexture, false, false);
+            updateInternal(group, camera, null, Mask.All, false);
+            ValueCell.updateIfChanged(globalUniforms.uPickType, pickType);
 
             const { renderables } = group;
             for (let i = 0, il = renderables.length; i < il; ++i) {
                 if (!renderables[i].state.colorOnly) {
-                    renderObject(renderables[i], variant);
+                    renderObject(renderables[i], variant, Flag.None);
                 }
             }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderPick');
         };
 
-        const renderDepth = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
+        const renderDepth = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderDepth');
             state.disable(gl.BLEND);
             state.enable(gl.DEPTH_TEST);
             state.depthMask(true);
 
-            updateInternal(group, camera, depthTexture, false, false);
+            updateInternal(group, camera, null, Mask.All, false);
 
             const { renderables } = group;
             for (let i = 0, il = renderables.length; i < il; ++i) {
-                renderObject(renderables[i], 'depth');
+                renderObject(renderables[i], 'depth', Flag.None);
             }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderDepth');
         };
 
-        const renderMarkingDepth = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
+        const renderDepthOpaque = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderDepthOpaque');
             state.disable(gl.BLEND);
             state.enable(gl.DEPTH_TEST);
             state.depthMask(true);
 
-            updateInternal(group, camera, depthTexture, false, false);
+            updateInternal(group, camera, null, Mask.Opaque, false);
+
+            const { renderables } = group;
+            for (let i = 0, il = renderables.length; i < il; ++i) {
+                const r = renderables[i];
+                if (checkOpaque(r)) {
+                    renderObject(r, 'depth', Flag.None);
+                }
+            }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderDepthOpaque');
+        };
+
+        const renderDepthOpaqueBack = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderDepthOpaqueBack');
+            state.disable(gl.BLEND);
+            state.enable(gl.DEPTH_TEST);
+            state.depthMask(true);
+            state.depthFunc(gl.GREATER);
+
+            updateInternal(group, camera, null, Mask.Opaque, false);
+
+            const { renderables } = group;
+            for (let i = 0, il = renderables.length; i < il; ++i) {
+                const r = renderables[i];
+                if (checkOpaque(r)) {
+                    renderObject(r, 'depth', Flag.BlendedBack);
+                }
+            }
+            state.depthFunc(gl.LESS);
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderDepthOpaqueBack');
+        };
+
+        const renderDepthTransparent = (group: Scene.Group, camera: ICamera, depthTexture: Texture) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderDepthTransparent');
+            state.disable(gl.BLEND);
+            state.enable(gl.DEPTH_TEST);
+            state.depthMask(true);
+
+            updateInternal(group, camera, depthTexture, Mask.Transparent, false);
+
+            const { renderables } = group;
+            for (let i = 0, il = renderables.length; i < il; ++i) {
+                const r = renderables[i];
+                if (checkTransparent(r)) {
+                    renderObject(r, 'depth', Flag.None);
+                }
+            }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderDepthTransparent');
+        };
+
+        const renderMarkingDepth = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderMarkingDepth');
+            state.disable(gl.BLEND);
+            state.enable(gl.DEPTH_TEST);
+            state.depthMask(true);
+
+            updateInternal(group, camera, null, Mask.All, false);
+            ValueCell.updateIfChanged(globalUniforms.uMarkingType, MarkingType.Depth);
 
             const { renderables } = group;
             for (let i = 0, il = renderables.length; i < il; ++i) {
                 const r = renderables[i];
 
-                if (r.values.markerAverage.ref.value !== 1) {
-                    renderObject(renderables[i], 'markingDepth');
+                const alpha = clamp(r.values.alpha.ref.value * r.state.alphaFactor, 0, 1);
+                if (alpha !== 0 && r.values.transparencyAverage.ref.value !== 1 && r.values.markerAverage.ref.value !== 1) {
+                    renderObject(renderables[i], 'marking', Flag.None);
                 }
             }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderMarkingDepth');
         };
 
         const renderMarkingMask = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderMarkingMask');
             state.disable(gl.BLEND);
             state.enable(gl.DEPTH_TEST);
             state.depthMask(true);
 
-            updateInternal(group, camera, depthTexture, false, !!depthTexture);
+            updateInternal(group, camera, depthTexture, Mask.All, !!depthTexture);
+            ValueCell.updateIfChanged(globalUniforms.uMarkingType, MarkingType.Mask);
 
             const { renderables } = group;
             for (let i = 0, il = renderables.length; i < il; ++i) {
                 const r = renderables[i];
 
                 if (r.values.markerAverage.ref.value > 0) {
-                    renderObject(renderables[i], 'markingMask');
+                    renderObject(renderables[i], 'marking', Flag.None);
                 }
             }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderMarkingMask');
         };
 
-        const renderBlended = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
-            renderBlendedOpaque(group, camera, depthTexture);
-            renderBlendedTransparent(group, camera, depthTexture);
-        };
-
-        const renderBlendedOpaque = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
+        const renderEmissive = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderEmissive');
             state.disable(gl.BLEND);
             state.enable(gl.DEPTH_TEST);
             state.depthMask(true);
 
-            updateInternal(group, camera, depthTexture, false, false);
+            updateInternal(group, camera, null, Mask.Opaque, false);
 
             const { renderables } = group;
             for (let i = 0, il = renderables.length; i < il; ++i) {
                 const r = renderables[i];
-                if (r.state.opaque) {
-                    renderObject(r, 'colorBlended');
+                if (checkOpaque(r)) {
+                    renderObject(r, 'emissive', Flag.None);
                 }
+            }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderEmissive');
+        };
+
+        const renderTracing = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderTracing');
+            state.disable(gl.BLEND);
+            state.enable(gl.DEPTH_TEST);
+            state.depthMask(true);
+
+            updateInternal(group, camera, null, Mask.Opaque, false);
+
+            const { renderables } = group;
+            for (let i = 0, il = renderables.length; i < il; ++i) {
+                const r = renderables[i];
+                if (checkOpaque(r)) {
+                    renderObject(r, 'tracing', Flag.None);
+                }
+            }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderTracing');
+        };
+
+        const renderBlended = (scene: Scene, camera: ICamera) => {
+            if (scene.hasOpaque) {
+                renderOpaque(scene, camera);
+            }
+            if (scene.opacityAverage < 1) {
+                renderBlendedTransparent(scene, camera);
             }
         };
 
-        const renderBlendedTransparent = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
+        const renderOpaque = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderOpaque');
+            state.disable(gl.BLEND);
             state.enable(gl.DEPTH_TEST);
+            state.depthMask(true);
 
-            updateInternal(group, camera, depthTexture, false, false);
+            updateInternal(group, camera, null, Mask.Opaque, false);
 
             const { renderables } = group;
+            for (let i = 0, il = renderables.length; i < il; ++i) {
+                const r = renderables[i];
+                if (checkOpaque(r)) {
+                    renderObject(r, 'color', Flag.None);
+                }
+            }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderOpaque');
+        };
 
+        const renderBlendedTransparent = (group: Scene.Group, camera: ICamera) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderBlendedTransparent');
             if (transparentBackground) {
                 state.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
             } else {
                 state.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
             }
             state.enable(gl.BLEND);
-
-            state.depthMask(true);
-            for (let i = 0, il = renderables.length; i < il; ++i) {
-                const r = renderables[i];
-                if (!r.state.opaque && r.state.writeDepth) {
-                    renderObject(r, 'colorBlended');
-                }
-            }
-
-            state.depthMask(false);
-            for (let i = 0, il = renderables.length; i < il; ++i) {
-                const r = renderables[i];
-                if (!r.state.opaque && !r.state.writeDepth) {
-                    renderObject(r, 'colorBlended');
-                }
-            }
-        };
-
-        const renderBlendedVolumeOpaque = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
-            state.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            state.enable(gl.BLEND);
-
-            updateInternal(group, camera, depthTexture, false, false);
-
-            const { renderables } = group;
-            for (let i = 0, il = renderables.length; i < il; ++i) {
-                const r = renderables[i];
-
-                // TODO: simplify, handle in renderable.state???
-                // uAlpha is updated in "render" so we need to recompute it here
-                const alpha = clamp(r.values.alpha.ref.value * r.state.alphaFactor, 0, 1);
-                if (alpha === 1 && r.values.transparencyAverage.ref.value !== 1 && !r.values.dXrayShaded?.ref.value) {
-                    renderObject(r, 'colorBlended');
-                }
-            }
-        };
-
-        const renderBlendedVolumeTransparent = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
-            state.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            state.enable(gl.BLEND);
-
-            updateInternal(group, camera, depthTexture, false, false);
-
-            const { renderables } = group;
-            for (let i = 0, il = renderables.length; i < il; ++i) {
-                const r = renderables[i];
-
-                // TODO: simplify, handle in renderable.state???
-                // uAlpha is updated in "render" so we need to recompute it here
-                const alpha = clamp(r.values.alpha.ref.value * r.state.alphaFactor, 0, 1);
-                if (alpha < 1 || r.values.transparencyAverage.ref.value > 0 || r.values.dXrayShaded?.ref.value) {
-                    renderObject(r, 'colorBlended');
-                }
-            }
-        };
-
-        const renderWboitOpaque = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
-            state.disable(gl.BLEND);
             state.enable(gl.DEPTH_TEST);
-            state.depthMask(true);
+            state.depthMask(false);
 
-            updateInternal(group, camera, depthTexture, false, false);
+            updateInternal(group, camera, null, Mask.Transparent, false);
 
             const { renderables } = group;
             for (let i = 0, il = renderables.length; i < il; ++i) {
                 const r = renderables[i];
-
-                // TODO: simplify, handle in renderable.state???
-                // uAlpha is updated in "render" so we need to recompute it here
-                const alpha = clamp(r.values.alpha.ref.value * r.state.alphaFactor, 0, 1);
-                if (alpha === 1 && r.values.transparencyAverage.ref.value !== 1 && r.values.dRenderMode?.ref.value !== 'volume' && r.values.dPointStyle?.ref.value !== 'fuzzy' && !r.values.dXrayShaded?.ref.value) {
-                    renderObject(r, 'colorWboit');
+                if (checkTransparent(r)) {
+                    if (r.values.uDoubleSided?.ref.value) {
+                        // render frontfaces and backfaces separately to avoid artefacts
+                        if (r.values.dTransparentBackfaces?.ref.value !== 'opaque') {
+                            renderObject(r, 'color', Flag.BlendedBack);
+                        }
+                        renderObject(r, 'color', Flag.BlendedFront);
+                    } else {
+                        renderObject(r, 'color', Flag.None);
+                    }
                 }
             }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderBlendedTransparent');
+        };
+
+        const renderVolume = (group: Scene.Group, camera: ICamera, depthTexture: Texture) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderVolume');
+            state.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            state.enable(gl.BLEND);
+            // depth test done manually in shader against `depthTexture`
+            state.disable(gl.DEPTH_TEST);
+            state.depthMask(false);
+
+            updateInternal(group, camera, depthTexture, Mask.Transparent, false);
+
+            const { renderables } = group;
+            for (let i = 0, il = renderables.length; i < il; ++i) {
+                const r = renderables[i];
+                if (r.values.dGeometryType.ref.value === 'directVolume') {
+                    renderObject(r, 'color', Flag.None);
+                }
+            }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderVolume');
         };
 
         const renderWboitTransparent = (group: Scene.Group, camera: ICamera, depthTexture: Texture | null) => {
-            updateInternal(group, camera, depthTexture, true, false);
+            if (isTimingMode) ctx.timer.mark('Renderer.renderWboitTransparent');
+            updateInternal(group, camera, depthTexture, Mask.Transparent, false);
 
             const { renderables } = group;
             for (let i = 0, il = renderables.length; i < il; ++i) {
                 const r = renderables[i];
-
-                // TODO: simplify, handle in renderable.state???
-                // uAlpha is updated in "render" so we need to recompute it here
-                const alpha = clamp(r.values.alpha.ref.value * r.state.alphaFactor, 0, 1);
-                if (alpha < 1 || r.values.transparencyAverage.ref.value > 0 || r.values.dRenderMode?.ref.value === 'volume' || r.values.dPointStyle?.ref.value === 'fuzzy' || !!r.values.uBackgroundColor || r.values.dXrayShaded?.ref.value) {
-                    renderObject(r, 'colorWboit');
+                if (checkTransparent(r)) {
+                    renderObject(r, 'color', Flag.None);
                 }
             }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderWboitTransparent');
+        };
+
+        const renderDpoitTransparent = (group: Scene.Group, camera: ICamera, depthTexture: Texture, dpoitTextures: { depth: Texture, frontColor: Texture, backColor: Texture }) => {
+            if (isTimingMode) ctx.timer.mark('Renderer.renderDpoitTransparent');
+
+            state.enable(gl.BLEND);
+
+            arrayMapUpsert(sharedTexturesList, 'tDpoitDepth', dpoitTextures.depth);
+            arrayMapUpsert(sharedTexturesList, 'tDpoitFrontColor', dpoitTextures.frontColor);
+            arrayMapUpsert(sharedTexturesList, 'tDpoitBackColor', dpoitTextures.backColor);
+
+            updateInternal(group, camera, depthTexture, Mask.Transparent, false);
+
+            const { renderables } = group;
+
+            for (let i = 0, il = renderables.length; i < il; ++i) {
+                const r = renderables[i];
+                if (checkTransparent(r)) {
+                    renderObject(r, 'color', Flag.None);
+                }
+            }
+            if (isTimingMode) ctx.timer.markEnd('Renderer.renderDpoitTransparent');
         };
 
         return {
-            clear: (toBackgroundColor: boolean) => {
+            clear: (toBackgroundColor: boolean, ignoreTransparentBackground?: boolean, forceToTransparency?: boolean) => {
                 state.enable(gl.SCISSOR_TEST);
                 state.enable(gl.DEPTH_TEST);
                 state.colorMask(true, true, true, true);
                 state.depthMask(true);
 
-                if (transparentBackground) {
+                if (forceToTransparency || transparentBackground && !ignoreTransparentBackground) {
                     state.clearColor(0, 0, 0, 0);
                 } else if (toBackgroundColor) {
                     state.clearColor(bgColor[0], bgColor[1], bgColor[2], 1);
@@ -611,25 +789,36 @@ namespace Renderer {
                 }
                 gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
             },
-            clearDepth: () => {
+            clearDepth: (packed = false) => {
                 state.enable(gl.SCISSOR_TEST);
                 state.enable(gl.DEPTH_TEST);
                 state.depthMask(true);
-                gl.clear(gl.DEPTH_BUFFER_BIT);
+
+                if (packed) {
+                    state.colorMask(true, true, true, true);
+                    state.clearColor(1, 1, 1, 1);
+                    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                } else {
+                    gl.clear(gl.DEPTH_BUFFER_BIT);
+                }
             },
             update,
 
             renderPick,
             renderDepth,
+            renderDepthOpaque,
+            renderDepthOpaqueBack,
+            renderDepthTransparent,
             renderMarkingDepth,
             renderMarkingMask,
+            renderEmissive,
+            renderTracing,
             renderBlended,
-            renderBlendedOpaque,
+            renderOpaque,
             renderBlendedTransparent,
-            renderBlendedVolumeOpaque,
-            renderBlendedVolumeTransparent,
-            renderWboitOpaque,
+            renderVolume,
             renderWboitTransparent,
+            renderDpoitTransparent,
 
             setProps: (props: Partial<RendererProps>) => {
                 if (props.backgroundColor !== undefined && props.backgroundColor !== p.backgroundColor) {
@@ -656,6 +845,9 @@ namespace Renderer {
                     ValueCell.update(globalUniforms.uInteriorColor, Color.toVec3Normalized(globalUniforms.uInteriorColor.ref.value, p.interiorColor));
                 }
 
+                if (props.colorMarker !== undefined && props.colorMarker !== p.colorMarker) {
+                    p.colorMarker = props.colorMarker;
+                }
                 if (props.highlightColor !== undefined && props.highlightColor !== p.highlightColor) {
                     p.highlightColor = props.highlightColor;
                     ValueCell.update(globalUniforms.uHighlightColor, Color.toVec3Normalized(globalUniforms.uHighlightColor.ref.value, p.highlightColor));
@@ -664,6 +856,10 @@ namespace Renderer {
                     p.selectColor = props.selectColor;
                     ValueCell.update(globalUniforms.uSelectColor, Color.toVec3Normalized(globalUniforms.uSelectColor.ref.value, p.selectColor));
                 }
+                if (props.dimColor !== undefined && props.dimColor !== p.dimColor) {
+                    p.dimColor = props.dimColor;
+                    ValueCell.update(globalUniforms.uDimColor, Color.toVec3Normalized(globalUniforms.uDimColor.ref.value, p.dimColor));
+                }
                 if (props.highlightStrength !== undefined && props.highlightStrength !== p.highlightStrength) {
                     p.highlightStrength = props.highlightStrength;
                     ValueCell.update(globalUniforms.uHighlightStrength, p.highlightStrength);
@@ -671,6 +867,10 @@ namespace Renderer {
                 if (props.selectStrength !== undefined && props.selectStrength !== p.selectStrength) {
                     p.selectStrength = props.selectStrength;
                     ValueCell.update(globalUniforms.uSelectStrength, p.selectStrength);
+                }
+                if (props.dimStrength !== undefined && props.dimStrength !== p.dimStrength) {
+                    p.dimStrength = props.dimStrength;
+                    ValueCell.update(globalUniforms.uDimStrength, p.dimStrength);
                 }
                 if (props.markerPriority !== undefined && props.markerPriority !== p.markerPriority) {
                     p.markerPriority = props.markerPriority;
@@ -682,28 +882,36 @@ namespace Renderer {
                     ValueCell.update(globalUniforms.uXrayEdgeFalloff, p.xrayEdgeFalloff);
                 }
 
-                if (props.style !== undefined) {
-                    p.style = props.style;
-                    Object.assign(style, getStyle(props.style));
-                    ValueCell.updateIfChanged(globalUniforms.uLightIntensity, style.lightIntensity);
-                    ValueCell.updateIfChanged(globalUniforms.uAmbientIntensity, style.ambientIntensity);
-                    ValueCell.updateIfChanged(globalUniforms.uMetalness, style.metalness);
-                    ValueCell.updateIfChanged(globalUniforms.uRoughness, style.roughness);
-                    ValueCell.updateIfChanged(globalUniforms.uReflectivity, style.reflectivity);
+                if (props.celSteps !== undefined && props.celSteps !== p.celSteps) {
+                    p.celSteps = props.celSteps;
+                    ValueCell.update(globalUniforms.uCelSteps, p.celSteps);
                 }
 
-                if (props.clip !== undefined && !deepEqual(props.clip, p.clip)) {
-                    p.clip = props.clip;
-                    Object.assign(clip, getClip(props.clip, clip));
-                    ValueCell.update(globalUniforms.uClipObjectPosition, clip.objects.position);
-                    ValueCell.update(globalUniforms.uClipObjectRotation, clip.objects.rotation);
-                    ValueCell.update(globalUniforms.uClipObjectScale, clip.objects.scale);
-                    ValueCell.update(globalUniforms.uClipObjectType, clip.objects.type);
+                if (props.exposure !== undefined && props.exposure !== p.exposure) {
+                    p.exposure = props.exposure;
+                    ValueCell.update(globalUniforms.uExposure, p.exposure);
+                }
+
+                if (props.light !== undefined && !deepEqual(props.light, p.light)) {
+                    p.light = props.light;
+                    Object.assign(light, getLight(props.light, light));
+                    ValueCell.update(globalUniforms.uLightDirection, light.direction);
+                    ValueCell.update(globalUniforms.uLightColor, light.color);
+                }
+                if (props.ambientColor !== undefined && props.ambientColor !== p.ambientColor) {
+                    p.ambientColor = props.ambientColor;
+                    Vec3.scale(ambientColor, Color.toArrayNormalized(p.ambientColor, ambientColor, 0), p.ambientIntensity);
+                    ValueCell.update(globalUniforms.uAmbientColor, ambientColor);
+                }
+                if (props.ambientIntensity !== undefined && props.ambientIntensity !== p.ambientIntensity) {
+                    p.ambientIntensity = props.ambientIntensity;
+                    Vec3.scale(ambientColor, Color.toArrayNormalized(p.ambientColor, ambientColor, 0), p.ambientIntensity);
+                    ValueCell.update(globalUniforms.uAmbientColor, ambientColor);
                 }
             },
             setViewport: (x: number, y: number, width: number, height: number) => {
-                gl.viewport(x, y, width, height);
-                gl.scissor(x, y, width, height);
+                state.viewport(x, y, width, height);
+                state.scissor(x, y, width, height);
                 if (x !== viewport.x || y !== viewport.y || width !== viewport.width || height !== viewport.height) {
                     Viewport.set(viewport, x, y, width, height);
                     ValueCell.update(globalUniforms.uViewport, Vec4.set(globalUniforms.uViewport.ref.value, x, y, width, height));
@@ -719,6 +927,9 @@ namespace Renderer {
             },
             setPixelRatio: (value: number) => {
                 ValueCell.update(globalUniforms.uPixelRatio, value);
+            },
+            setOcclusionTest: (f: ((s: Sphere3D) => boolean) | null) => {
+                isOccluded = f;
             },
 
             props: p,
@@ -738,6 +949,12 @@ namespace Renderer {
                     instanceCount: stats.instanceCount,
                     instancedDrawCount: stats.instancedDrawCount,
                 };
+            },
+            get light(): Light {
+                return light;
+            },
+            get ambientColor(): Vec3 {
+                return globalUniforms.uAmbientColor.ref.value;
             },
             dispose: () => {
                 // TODO

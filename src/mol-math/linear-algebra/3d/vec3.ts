@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -18,24 +18,24 @@
  */
 
 import { Mat4 } from './mat4';
-import { spline as _spline, quadraticBezier as _quadraticBezier, clamp } from '../../interpolate';
+import { spline as _spline, quadraticBezier as _quadraticBezier, clamp as _clamp } from '../../interpolate';
 import { NumberArray } from '../../../mol-util/type-helpers';
 import { Mat3 } from './mat3';
 import { Quat } from './quat';
 import { EPSILON } from './common';
 
-export { ReadonlyVec3 };
+const _isFinite = isFinite;
 
-interface Vec3 extends Array<number> { [d: number]: number, '@type': 'vec3', length: 3 }
-interface ReadonlyVec3 extends Array<number> { readonly [d: number]: number, '@type': 'vec3', length: 3 }
+export interface Vec3 extends Array<number> { [d: number]: number, '@type': 'vec3', length: 3 }
+export interface ReadonlyVec3 extends Array<number> { readonly [d: number]: number, '@type': 'vec3', length: 3 }
 
-function Vec3() {
+export function Vec3() {
     return Vec3.zero();
 }
 
-namespace Vec3 {
+export namespace Vec3 {
     export function zero(): Vec3 {
-        const out = [0.1, 0.0, 0.0];
+        const out = [0.1, 0.0, 0.0]; // ensure backing array of type double
         out[0] = 0;
         return out as any;
     }
@@ -46,6 +46,10 @@ namespace Vec3 {
         out[1] = a[1];
         out[2] = a[2];
         return out;
+    }
+
+    export function isFinite(a: Vec3): boolean {
+        return _isFinite(a[0]) && _isFinite(a[1]) && _isFinite(a[2]);
     }
 
     export function hasNaN(a: Vec3) {
@@ -74,7 +78,7 @@ namespace Vec3 {
         return v;
     }
 
-    export function toArray(v: Vec3, out: NumberArray, offset: number) {
+    export function toArray<T extends NumberArray>(v: Vec3, out: T, offset: number) {
         out[offset + 0] = v[0];
         out[offset + 1] = v[1];
         out[offset + 2] = v[2];
@@ -246,6 +250,16 @@ namespace Vec3 {
         return out;
     }
 
+    /**
+     * Assumes min < max, componentwise
+     */
+    export function clamp(out: Vec3, a: Vec3, min: Vec3, max: Vec3) {
+        out[0] = Math.max(min[0], Math.min(max[0], a[0]));
+        out[1] = Math.max(min[1], Math.min(max[1], a[1]));
+        out[2] = Math.max(min[2], Math.min(max[2], a[2]));
+        return out;
+    }
+
     export function distance(a: Vec3, b: Vec3) {
         const x = b[0] - a[0],
             y = b[1] - a[1],
@@ -341,7 +355,7 @@ namespace Vec3 {
 
     const slerpRelVec = zero();
     export function slerp(out: Vec3, a: Vec3, b: Vec3, t: number) {
-        const d = clamp(dot(a, b), -1, 1);
+        const d = _clamp(dot(a, b), -1, 1);
         const theta = Math.acos(d) * t;
         scaleAndAdd(slerpRelVec, b, a, -d);
         normalize(slerpRelVec, slerpRelVec);
@@ -429,6 +443,14 @@ namespace Vec3 {
         return out;
     }
 
+    export function transformDirection(out: Vec3, a: Vec3, m: Mat4) {
+        const x = a[0], y = a[1], z = a[2];
+        out[0] = m[0] * x + m[4] * y + m[8] * z;
+        out[1] = m[1] * x + m[5] * y + m[9] * z;
+        out[2] = m[2] * x + m[6] * y + m[10] * z;
+        return normalize(out, out);
+    }
+
     /**
      * Like `transformMat4` but with offsets into arrays
      */
@@ -438,6 +460,26 @@ namespace Vec3 {
         out[0 + outO] = (m[0 + oM] * x + m[4 + oM] * y + m[8 + oM] * z + m[12 + oM]) * w;
         out[1 + outO] = (m[1 + oM] * x + m[5 + oM] * y + m[9 + oM] * z + m[13 + oM]) * w;
         out[2 + outO] = (m[2 + oM] * x + m[6 + oM] * y + m[10 + oM] * z + m[14 + oM]) * w;
+        return out;
+    }
+
+    /**
+     * Transforms the direction vector with a Mat4. 4th vector component is implicitly '0'
+     * This means the translation components of the matrix are ignored.
+     * Assumes that m is already the transpose of the inverse matrix suitable for normal transformation.
+     */
+    export function transformDirectionOffset(out: NumberArray, a: NumberArray, m: NumberArray, outO: number, aO: number, oM: number) {
+        const x = a[0 + aO], y = a[1 + aO], z = a[2 + aO];
+        out[0 + outO] = m[0 + oM] * x + m[4 + oM] * y + m[8 + oM] * z;
+        out[1 + outO] = m[1 + oM] * x + m[5 + oM] * y + m[9 + oM] * z;
+        out[2 + outO] = m[2 + oM] * x + m[6 + oM] * y + m[10 + oM] * z;
+        // Normalize the output vector to handle non-uniform scaling
+        const len = Math.hypot(out[0 + outO], out[1 + outO], out[2 + outO]);
+        if (len > 0) {
+            out[0 + outO] /= len;
+            out[1 + outO] /= len;
+            out[2 + outO] /= len;
+        }
         return out;
     }
 
@@ -477,7 +519,7 @@ namespace Vec3 {
         const denominator = Math.sqrt(squaredMagnitude(a) * squaredMagnitude(b));
         if (denominator === 0) return Math.PI / 2;
         const theta = dot(a, b) / denominator;
-        return Math.acos(clamp(theta, -1, 1)); // clamp to avoid numerical problems
+        return Math.acos(_clamp(theta, -1, 1)); // clamp to avoid numerical problems
     }
 
     const tmp_dh_ab = zero();
@@ -505,6 +547,19 @@ namespace Vec3 {
     }
 
     /**
+     * @param inclination in radians [0, PI]
+     * @param azimuth in radians [0, 2 * PI]
+     * @param radius [0, +Inf]
+     */
+    export function directionFromSpherical(out: Vec3, inclination: number, azimuth: number, radius: number): Vec3 {
+        return Vec3.set(out,
+            radius * Math.cos(azimuth) * Math.sin(inclination),
+            radius * Math.sin(azimuth) * Math.sin(inclination),
+            radius * Math.cos(inclination)
+        );
+    }
+
+    /**
      * Returns whether or not the vectors have exactly the same elements in the same position (when compared with ===)
      */
     export function exactEquals(a: Vec3, b: Vec3) {
@@ -527,8 +582,8 @@ namespace Vec3 {
         const by = angle(a, b);
         if (Math.abs(by) < 0.0001) return Mat4.setIdentity(mat);
         if (Math.abs(by - Math.PI) < EPSILON) {
-            // here, axis can be [0,0,0] but the rotation is a simple flip
-            return Mat4.fromScaling(mat, negUnit);
+            // choose arbitrary orthogonal axis
+            return Mat4.fromRotation(mat, Math.PI, Math.abs(a[0]) < 0.9 ? Vec3.unitX : Vec3.unitZ);
         }
         const axis = cross(rotTemp, a, b);
         return Mat4.fromRotation(mat, by, axis);
@@ -579,6 +634,34 @@ namespace Vec3 {
         return out;
     }
 
+    /**
+     * Get a normalized vector that is orthogonal to `dir`
+     */
+    export function orthogonalDirection(out: Vec3, dir: Vec3) {
+        if (isZero(dir)) {
+            return copy(out, Vec3.unitX);
+        } else {
+            const tmp = zero();
+            if (Math.abs(dir[0]) < Math.abs(dir[1]) && Math.abs(dir[0]) < Math.abs(dir[2])) {
+                // dir[0] is the smallest component
+                tmp[0] = 0;
+                tmp[1] = dir[2];
+                tmp[2] = -dir[1];
+            } else if (Math.abs(dir[1]) < Math.abs(dir[2])) {
+                // dir[1] is the smallest component
+                tmp[0] = -dir[2];
+                tmp[1] = 0;
+                tmp[2] = dir[0];
+            } else {
+                // dir[2] is the smallest component
+                tmp[0] = dir[1];
+                tmp[1] = -dir[0];
+                tmp[2] = 0;
+            }
+            return normalize(out, tmp);
+        }
+    }
+
     const triangleNormalTmpAB = zero();
     const triangleNormalTmpAC = zero();
     /** Calculate normal for the triangle defined by `a`, `b` and `c` */
@@ -586,6 +669,11 @@ namespace Vec3 {
         sub(triangleNormalTmpAB, b, a);
         sub(triangleNormalTmpAC, c, a);
         return normalize(out, cross(out, triangleNormalTmpAB, triangleNormalTmpAC));
+    }
+
+    const centerTmpV = zero();
+    export function center(out: Vec3, a: Vec3, b: Vec3): Vec3 {
+        return Vec3.scaleAndAdd(out, a, Vec3.sub(centerTmpV, b, a), 0.5);
     }
 
     export function toString(a: Vec3, precision?: number) {
@@ -604,5 +692,3 @@ namespace Vec3 {
     export const negUnitY: ReadonlyVec3 = create(0, -1, 0);
     export const negUnitZ: ReadonlyVec3 = create(0, 0, -1);
 }
-
-export { Vec3 };

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -23,6 +23,7 @@ import { RenderObjectValues } from '../../mol-gl/render-object';
 import { TextureMesh } from './texture-mesh/texture-mesh';
 import { Image } from './image/image';
 import { Cylinders } from './cylinders/cylinders';
+import { arrayMaxPackedIntToRGB } from '../../mol-util/number-packing';
 
 export type GeometryKind = 'mesh' | 'points' | 'spheres' | 'cylinders' | 'text' | 'lines' | 'direct-volume' | 'image' | 'texture-mesh'
 
@@ -81,7 +82,7 @@ export namespace Geometry {
         switch (geometry.kind) {
             case 'mesh': return geometry.vertexCount;
             case 'points': return geometry.pointCount;
-            case 'spheres': return geometry.sphereCount * 4;
+            case 'spheres': return geometry.sphereCount * 6;
             case 'cylinders': return geometry.cylinderCount * 6;
             case 'text': return geometry.charCount * 4;
             case 'lines': return geometry.lineCount * 4;
@@ -105,7 +106,7 @@ export namespace Geometry {
             case 'direct-volume':
                 return 1;
             case 'image':
-                return arrayMax(geometry.groupTexture.ref.value.array) + 1;
+                return arrayMaxPackedIntToRGB(geometry.groupTexture.ref.value.array, 4) + 1;
             case 'texture-mesh':
                 return geometry.groupCount;
         }

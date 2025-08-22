@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -15,7 +15,7 @@ import { SaccharideComponentMap } from '../structure/carbohydrates/constants';
 import { ModelFormat } from '../../../mol-model-formats/format';
 import { calcModelCenter, getAsymIdCount } from './util';
 import { Vec3 } from '../../../mol-math/linear-algebra';
-import { Coordinates } from '../coordinates';
+import { Coordinates, Frame } from '../coordinates';
 import { Topology } from '../topology';
 import { Task } from '../../../mol-task';
 import { IndexPairBonds } from '../../../mol-model-formats/structure/property/bonds/index-pair';
@@ -30,6 +30,7 @@ import { Trajectory, ArrayTrajectory } from '../trajectory';
 import { Unit } from '../structure';
 import { SortedArray } from '../../../mol-data/int/sorted-array';
 import { PolymerType } from './types';
+import { ModelSecondaryStructure } from '../../../mol-model-formats/structure/property/secondary-structure';
 
 /**
  * Interface to the "source data" of the molecule.
@@ -95,17 +96,21 @@ export namespace Model {
         const trajectory: Model[] = [];
         const { frames } = coordinates;
 
-        const srcIndex = model.atomicHierarchy.atomSourceIndex;
-        const isIdentity = Column.isIdentity(srcIndex);
-        const srcIndexArray = isIdentity ? void 0 : srcIndex.toArray({ array: Int32Array });
+        const srcIndexArray = getSourceIndexArray(model);
+        const coarseGrained = isCoarseGrained(model);
+        const elementCount = model.atomicHierarchy.atoms._rowCount;
 
         for (let i = 0, il = frames.length; i < il; ++i) {
             const f = frames[i];
+            if (f.elementCount !== elementCount) {
+                throw new Error(`Frame element count mismatch, got ${f.elementCount} but expected ${elementCount}.`);
+            }
+
             const m = {
                 ...model,
                 id: UUID.create22(),
                 modelNum: i,
-                atomicConformation: Coordinates.getAtomicConformation(f, model.atomicConformation.atomId, srcIndexArray),
+                atomicConformation: getAtomicConformationFromFrame(model, f),
                 // TODO: add support for supplying sphere and gaussian coordinates in addition to atomic coordinates?
                 // coarseConformation: coarse.conformation,
                 customProperties: new CustomProperties(),
@@ -119,10 +124,23 @@ export namespace Model {
             }
 
             TrajectoryInfo.set(m, { index: i, size: frames.length });
+            CoarseGrained.set(m, coarseGrained);
 
             trajectory.push(m);
         }
         return { trajectory, srcIndexArray };
+    }
+
+    function getSourceIndexArray(model: Model): ArrayLike<number> | undefined {
+        const srcIndex = model.atomicHierarchy.atomSourceIndex;
+        let srcIndexArray: ArrayLike<number> | undefined = undefined;
+        if ('__srcIndexArray__' in model._staticPropertyData) {
+            srcIndexArray = model._dynamicPropertyData.__srcIndexArray__;
+        } else {
+            srcIndexArray = Column.isIdentity(srcIndex) ? void 0 : srcIndex.toArray({ array: Int32Array });
+            model._dynamicPropertyData.__srcIndexArray__ = srcIndexArray;
+        }
+        return srcIndexArray;
     }
 
     export function trajectoryFromModelAndCoordinates(model: Model, coordinates: Coordinates): Trajectory {
@@ -138,14 +156,24 @@ export namespace Model {
 
             const bondData = { pairs: topology.bonds, count: model.atomicHierarchy.atoms._rowCount };
             const indexPairBonds = IndexPairBonds.fromData(bondData);
+            const coarseGrained = isCoarseGrained(model);
 
             let index = 0;
             for (const m of trajectory) {
                 IndexPairBonds.Provider.set(m, indexPairBonds);
                 TrajectoryInfo.set(m, { index: index++, size: trajectory.length });
+                CoarseGrained.set(m, coarseGrained);
             }
             return new ArrayTrajectory(trajectory);
         });
+    }
+
+    export function getAtomicConformationFromFrame(model: Model, frame: Frame) {
+        return Coordinates.getAtomicConformation(frame, {
+            atomId: model.atomicConformation.atomId,
+            occupancy: model.atomicConformation.occupancy,
+            B_iso_or_equiv: model.atomicConformation.B_iso_or_equiv
+        }, getSourceIndexArray(model));
     }
 
     const CenterProp = '__Center__';
@@ -203,6 +231,9 @@ export namespace Model {
     export type Index = number;
     export const Index = CustomModelProperty.createSimple<Index>('index', 'static');
 
+    export type MaxIndex = number;
+    export const MaxIndex = CustomModelProperty.createSimple<MaxIndex>('max_index', 'static');
+
     export function getRoot(model: Model) {
         return model.parent || model;
     }
@@ -225,35 +256,55 @@ export namespace Model {
     };
 
     const CoarseGrainedProp = '__CoarseGrained__';
+    export const CoarseGrained = {
+        get(model: Model): boolean | undefined {
+            return model._staticPropertyData[CoarseGrainedProp];
+        },
+        set(model: Model, coarseGrained: boolean) {
+            return model._staticPropertyData[CoarseGrainedProp] = coarseGrained;
+        }
+    };
     /**
-     * Has typical coarse grained atom names (BB, SC1) or less than three times as many
-     * atoms as polymer residues (C-alpha only models).
+     * Mark as coarse grained if any of the following conditions are met:
+     * - has typical coarse grained atom names (BB, SC1)
+     * - has less than three times as many atoms as polymer residues (C-alpha only models)
+     * - has no standard sidechain atoms
      */
     export function isCoarseGrained(model: Model): boolean {
-        if (model._staticPropertyData[CoarseGrainedProp] !== undefined) return model._staticPropertyData[CoarseGrainedProp];
+        let coarseGrained = CoarseGrained.get(model);
+        if (coarseGrained === undefined) {
+            let polymerResidueCount = 0;
+            let polymerDirectionCount = 0;
+            const { polymerType, directionToElementIndex } = model.atomicHierarchy.derived.residue;
+            for (let i = 0; i < polymerType.length; ++i) {
+                if (polymerType[i] !== PolymerType.NA) {
+                    polymerResidueCount += 1;
+                    if (directionToElementIndex[i] !== -1) polymerDirectionCount += 1;
+                }
+            }
 
-        let polymerResidueCount = 0;
-        const { polymerType } = model.atomicHierarchy.derived.residue;
-        for (let i = 0; i < polymerType.length; ++i) {
-            if (polymerType[i] !== PolymerType.NA) polymerResidueCount += 1;
+            // check for coarse grained atom names
+            let hasBB = false, hasSC1 = false;
+            const { label_atom_id, _rowCount: atomCount } = model.atomicHierarchy.atoms;
+            for (let i = 0; i < atomCount; ++i) {
+                const atomName = label_atom_id.value(i);
+                if (!hasBB && atomName === 'BB') hasBB = true;
+                if (!hasSC1 && atomName === 'SC1') hasSC1 = true;
+                if (hasBB && hasSC1) break;
+            }
+
+            coarseGrained = false;
+            if (atomCount > 0 && polymerResidueCount > 0) {
+                if (hasBB && hasSC1) {
+                    coarseGrained = true;
+                } else if (atomCount / polymerResidueCount < 3) {
+                    coarseGrained = true;
+                } else if (polymerDirectionCount === 0) {
+                    coarseGrained = true;
+                }
+            }
+            CoarseGrained.set(model, coarseGrained);
         }
-
-        // check for coarse grained atom names
-        let hasBB = false, hasSC1 = false;
-        const { label_atom_id, _rowCount: atomCount } = model.atomicHierarchy.atoms;
-        for (let i = 0; i < atomCount; ++i) {
-            const atomName = label_atom_id.value(i);
-            if (!hasBB && atomName === 'BB') hasBB = true;
-            if (!hasSC1 && atomName === 'SC1') hasSC1 = true;
-            if (hasBB && hasSC1) break;
-        }
-
-        const coarseGrained = (hasBB && hasSC1) || (
-            polymerResidueCount && atomCount
-                ? atomCount / polymerResidueCount < 3
-                : false
-        );
-        model._staticPropertyData[CoarseGrainedProp] = coarseGrained;
         return coarseGrained;
     }
 
@@ -283,8 +334,15 @@ export namespace Model {
     export function isFromPdbArchive(model: Model): boolean {
         if (!MmcifFormat.is(model.sourceData)) return false;
         const { db } = model.sourceData.data;
+        for (let i = 0, il = db.database_2.database_id.rowCount; i < il; ++i) {
+            if (db.database_2.database_id.value(i) === 'pdb') return true;
+        }
+        return false;
+    }
+
+    export function hasPdbId(model: Model): boolean {
+        if (!MmcifFormat.is(model.sourceData)) return false;
         return (
-            db.database_2.database_id.isDefined ||
             // 4 character PDB id
             model.entryId.match(/^[1-9][a-z0-9]{3,3}$/i) !== null ||
             // long PDB id
@@ -293,12 +351,15 @@ export namespace Model {
     }
 
     export function hasSecondaryStructure(model: Model): boolean {
-        if (!MmcifFormat.is(model.sourceData)) return false;
-        const { db } = model.sourceData.data;
-        return (
-            db.struct_conf.id.isDefined ||
-            db.struct_sheet_range.id.isDefined
-        );
+        if (MmcifFormat.is(model.sourceData)) {
+            const { db } = model.sourceData.data;
+            return (
+                db.struct_conf.id.isDefined ||
+                db.struct_sheet_range.id.isDefined
+            );
+        } else {
+            return ModelSecondaryStructure.Provider.isApplicable(model);
+        }
     }
 
     const tmpAngles90 = Vec3.create(1.5707963, 1.5707963, 1.5707963); // in radians
@@ -342,6 +403,33 @@ export namespace Model {
         return false;
     }
 
+    export function isExperimental(model: Model): boolean {
+        if (!MmcifFormat.is(model.sourceData)) return false;
+        const { db } = model.sourceData.data;
+        for (let i = 0; i < db.struct.pdbx_structure_determination_methodology.rowCount; i++) {
+            if (db.struct.pdbx_structure_determination_methodology.value(i).toLowerCase() === 'experimental') return true;
+        }
+        return false;
+    }
+
+    export function isIntegrative(model: Model): boolean {
+        if (!MmcifFormat.is(model.sourceData)) return false;
+        const { db } = model.sourceData.data;
+        for (let i = 0; i < db.struct.pdbx_structure_determination_methodology.rowCount; i++) {
+            if (db.struct.pdbx_structure_determination_methodology.value(i).toLowerCase() === 'integrative') return true;
+        }
+        return false;
+    }
+
+    export function isComputational(model: Model): boolean {
+        if (!MmcifFormat.is(model.sourceData)) return false;
+        const { db } = model.sourceData.data;
+        for (let i = 0; i < db.struct.pdbx_structure_determination_methodology.rowCount; i++) {
+            if (db.struct.pdbx_structure_determination_methodology.value(i).toLowerCase() === 'computational') return true;
+        }
+        return false;
+    }
+
     export function hasXrayMap(model: Model): boolean {
         if (!MmcifFormat.is(model.sourceData)) return false;
         // Check exprimental method to exclude models solved with
@@ -376,14 +464,15 @@ export namespace Model {
 
     export function probablyHasDensityMap(model: Model): boolean {
         if (!MmcifFormat.is(model.sourceData)) return false;
+        if (Model.isIntegrative(model)) return false;
         const { db } = model.sourceData.data;
         return hasDensityMap(model) || (
             // check if from pdb archive but missing relevant meta data
-            isFromPdbArchive(model) && (
+            hasPdbId(model) && (
                 !db.exptl.method.isDefined ||
                 (isFromXray(model) && (
                     !db.pdbx_database_status.status_code_sf.isDefined ||
-                    db.pdbx_database_status.status_code_sf.valueKind(0) === Column.ValueKind.Unknown
+                    db.pdbx_database_status.status_code_sf.valueKind(0) === Column.ValueKinds.Unknown
                 )) ||
                 (isFromEm(model) && (
                     !db.pdbx_database_related.db_name.isDefined

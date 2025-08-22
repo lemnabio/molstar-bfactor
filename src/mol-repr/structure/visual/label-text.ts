@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2023 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
@@ -16,16 +16,19 @@ import { ComplexTextVisual, ComplexTextParams, ComplexVisual } from '../complex-
 import { ElementIterator, getSerialElementLoci, eachSerialElement } from './util/element';
 import { ColorNames } from '../../../mol-util/color/names';
 import { Vec3 } from '../../../mol-math/linear-algebra';
-import { PhysicalSizeTheme } from '../../../mol-theme/size/physical';
 import { BoundaryHelper } from '../../../mol-math/geometry/boundary-helper';
+import { makeElementIgnoreTest } from './util/element';
 
 export const LabelTextParams = {
     ...ComplexTextParams,
-    background: PD.Boolean(true),
+    background: PD.Boolean(false),
     backgroundMargin: PD.Numeric(0, { min: 0, max: 1, step: 0.01 }),
     backgroundColor: PD.Color(ColorNames.black),
     backgroundOpacity: PD.Numeric(0.5, { min: 0, max: 1, step: 0.01 }),
-    level: PD.Select('residue', [['chain', 'Chain'], ['residue', 'Residue'], ['element', 'Element']] as const),
+    borderWidth: PD.Numeric(0.25, { min: 0, max: 0.5, step: 0.01 }),
+    level: PD.Select('residue', [['chain', 'Chain'], ['residue', 'Residue'], ['element', 'Element']] as const, { isEssential: true }),
+    ignoreHydrogens: PD.Boolean(false),
+    ignoreHydrogensVariant: PD.Select('all', PD.arrayToOptions(['all', 'non-polar'] as const)),
     chainScale: PD.Numeric(10, { min: 0, max: 20, step: 0.1 }),
     residueScale: PD.Numeric(1, { min: 0, max: 20, step: 0.1 }),
     elementScale: PD.Numeric(0.5, { min: 0, max: 20, step: 0.1 }),
@@ -46,7 +49,9 @@ export function LabelTextVisual(materialId: number): ComplexVisual<LabelTextPara
                 newProps.level !== currentProps.level ||
                 (newProps.level === 'chain' && newProps.chainScale !== currentProps.chainScale) ||
                 (newProps.level === 'residue' && newProps.residueScale !== currentProps.residueScale) ||
-                (newProps.level === 'element' && newProps.elementScale !== currentProps.elementScale)
+                (newProps.level === 'element' && newProps.elementScale !== currentProps.elementScale) ||
+                newProps.ignoreHydrogens !== currentProps.ignoreHydrogens ||
+                newProps.ignoreHydrogensVariant !== currentProps.ignoreHydrogensVariant
             );
         }
     }, materialId);
@@ -104,7 +109,7 @@ function createResidueText(ctx: VisualContext, structure: Structure, theme: Them
 
     for (let i = 0, il = units.length; i < il; ++i) {
         const unit = units[i];
-        const pos = unit.conformation.position;
+        const c = unit.conformation;
         const { elements } = unit;
         l.unit = unit;
         l.element = unit.elements[0];
@@ -121,12 +126,12 @@ function createResidueText(ctx: VisualContext, structure: Structure, theme: Them
 
             boundaryHelper.reset();
             for (let eI = start; eI < j; eI++) {
-                pos(elements[eI], tmpVec);
+                c.position(elements[eI], tmpVec);
                 boundaryHelper.includePosition(tmpVec);
             }
             boundaryHelper.finishedIncludeStep();
             for (let eI = start; eI < j; eI++) {
-                pos(elements[eI], tmpVec);
+                c.position(elements[eI], tmpVec);
                 boundaryHelper.radiusPosition(tmpVec);
             }
 
@@ -150,7 +155,7 @@ function createElementText(ctx: VisualContext, structure: Structure, theme: Them
     const { label_atom_id, label_alt_id } = StructureProperties.atom;
     const { cumulativeUnitElementCount } = serialMapping;
 
-    const sizeTheme = PhysicalSizeTheme({}, { scale: 1 });
+    const sizeTheme = theme.size;
 
     const count = structure.elementCount;
     const { elementScale } = props;
@@ -158,15 +163,18 @@ function createElementText(ctx: VisualContext, structure: Structure, theme: Them
 
     for (let i = 0, il = units.length; i < il; ++i) {
         const unit = units[i];
-        const pos = unit.conformation.position;
+        const c = unit.conformation;
         const { elements } = unit;
         l.unit = unit;
 
         const groupOffset = cumulativeUnitElementCount[i];
+        const ignore = makeElementIgnoreTest(structure, unit, { ...props, traceOnly: false });
 
         for (let j = 0, _j = elements.length; j < _j; j++) {
+            if (ignore && ignore(elements[j])) continue;
+
             l.element = elements[j];
-            pos(l.element, tmpVec);
+            c.position(l.element, tmpVec);
             const atomId = label_atom_id(l);
             const altId = label_alt_id(l);
             const text = altId ? `${atomId}%${altId}` : atomId;

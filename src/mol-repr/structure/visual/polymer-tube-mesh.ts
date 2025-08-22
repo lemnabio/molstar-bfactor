@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2023 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -21,6 +21,7 @@ import { Vec3 } from '../../../mol-math/linear-algebra';
 import { addSphere } from '../../../mol-geo/geometry/mesh/builder/sphere';
 import { BaseGeometry } from '../../../mol-geo/geometry/base';
 import { Sphere3D } from '../../../mol-math/geometry';
+import { StructureGroup } from './util/common';
 
 export const PolymerTubeMeshParams = {
     sizeFactor: PD.Numeric(0.2, { min: 0, max: 10, step: 0.01 }),
@@ -93,7 +94,7 @@ function createPolymerTubeMesh(ctx: VisualContext, unit: Unit, structure: Struct
         } else if (radialSegments === 4) {
             addSheet(builderState, curvePoints, normalVectors, binormalVectors, segmentCount, widthValues, heightValues, 0, startCap, endCap);
         } else {
-            addTube(builderState, curvePoints, normalVectors, binormalVectors, segmentCount, radialSegments, widthValues, heightValues, startCap, endCap);
+            addTube(builderState, curvePoints, normalVectors, binormalVectors, segmentCount, radialSegments, widthValues, heightValues, startCap, endCap, 'elliptical');
         }
 
         ++i;
@@ -117,7 +118,7 @@ export function PolymerTubeVisual(materialId: number): UnitsVisual<PolymerTubePa
     return UnitsMeshVisual<PolymerTubeParams>({
         defaultProps: PD.getDefaultValues(PolymerTubeParams),
         createGeometry: createPolymerTubeMesh,
-        createLocationIterator: PolymerLocationIterator.fromGroup,
+        createLocationIterator: (structureGroup: StructureGroup) => PolymerLocationIterator.fromGroup(structureGroup, { asSecondary: true }),
         getLoci: getPolymerElementLoci,
         eachLocation: eachPolymerElement,
         setUpdateState: (state: VisualUpdateState, newProps: PD.Values<PolymerTubeParams>, currentProps: PD.Values<PolymerTubeParams>) => {

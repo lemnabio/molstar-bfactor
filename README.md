@@ -1,6 +1,6 @@
 [![License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat)](./LICENSE)
 [![npm version](https://badge.fury.io/js/molstar.svg)](https://www.npmjs.com/package/molstar)
-[![Build Status](https://travis-ci.org/molstar/molstar.svg?branch=master)](https://travis-ci.org/molstar/molstar)
+[![Build](https://github.com/molstar/molstar/actions/workflows/node.yml/badge.svg)](https://github.com/molstar/molstar/actions/workflows/node.yml)
 [![Gitter](https://badges.gitter.im/molstar/Lobby.svg)](https://gitter.im/molstar/Lobby)
 
 # Mol*
@@ -10,6 +10,13 @@ The goal of **Mol\*** (*/'mol-star/*) is to provide a technology stack that serv
 When using Mol*, please cite:
 
 David Sehnal, Sebastian Bittrich, Mandar Deshpande, Radka Svobodová, Karel Berka, Václav Bazgier, Sameer Velankar, Stephen K Burley, Jaroslav Koča, Alexander S Rose: [Mol* Viewer: modern web app for 3D visualization and analysis of large biomolecular structures](https://doi.org/10.1093/nar/gkab314), *Nucleic Acids Research*, 2021; https://doi.org/10.1093/nar/gkab314.
+
+### Protein Data Bank Integrations
+
+- The [pdbe-molstar](https://github.com/molstar/pdbe-molstar) library is the Mol* implementation used by EMBL-EBI data resources such as [PDBe](https://pdbe.org/), [PDBe-KB](https://pdbe-kb.org/) and [AlphaFold DB](https://alphafold.ebi.ac.uk/). This implementation can be used as a JS plugin and a Web component and supports property/attribute-based easy customisation. It provides helper methods to facilitate programmatic interactions between the web application and the 3D viewer. It also provides a superposition view for overlaying all the observed ligand molecules on representative protein conformations.
+
+- [rcsb-molstar](https://github.com/molstar/rcsb-molstar) is the Mol* plugin used by [RCSB PDB](https://www.rcsb.org). The project provides additional presets for the visualization of structure alignments and structure motifs such as ligand binding sites. Furthermore, [rcsb-molstar](https://github.com/molstar/rcsb-molstar) allows to interactively add or hide of (parts of) chains, as seen in the [3D Protein Feature View](https://www.rcsb.org/3d-sequence/4hhb).
+
 
 ## Project Structure Overview
 
@@ -68,6 +75,26 @@ If working on just the viewer, ``npm run watch-viewer`` will provide shorter com
 
 Debug/production mode in browsers can be turned on/off during runtime by calling ``setMolStarDebugMode(true/false, true/false)`` from the dev console.
 
+### Cleaning and forcing a full rebuild
+    npm run clean
+
+Wipes the `build` and `lib` directories and `.tsbuildinfo` files.
+
+    npm run rebuild
+
+Runs the cleanup script prior to building the project, forcing a full rebuild of the project.
+
+Use these commands to resolve occasional build failures which may arise after some dependency updates. Once done, `npm run build` should work again. Note that full rebuilds take more time to complete.
+
+### Develop with `esbuild`
+
+Experimental support for faster builds with `esbuild`
+- `npm run dev:all` - watch mode for all apps and examples
+- `npm run dev:viewer` - watch mode for viewer
+- `npm run dev:apps` - watch mode for all apps
+- `npm run dev:examples` - watch mode for all examples
+- `npm run dev -- -a <app name 1> <app name 2> -e <example name 1> ...` - watch mode for specified apps/examples. `-a`/`-e` with without any names will build everything.
+
 ### Build for production:
     NODE_ENV=production npm run build
 
@@ -85,7 +112,6 @@ From the root of the project:
 
 and navigate to `build/viewer`
 
-
 ### Code generation
 **CIF schemas**
 
@@ -102,10 +128,9 @@ and navigate to `build/viewer`
 
     node --max-old-space-size=4096 lib/commonjs/cli/chem-comp-dict/create-ions.js src/mol-model/structure/model/types/ions.ts
 
+**Saccharide names**
 
-**GraphQL schemas**
-
-    node node_modules//@graphql-codegen/cli/bin -c src/extensions/rcsb/graphql/codegen.yml
+    node --max-old-space-size=4096 lib/commonjs/cli/chem-comp-dict/create-saccharides.js src/mol-model/structure/model/types/saccharides.ts
 
 ### Other scripts
 **Create chem comp bond table**
@@ -120,15 +145,20 @@ and navigate to `build/viewer`
 
     export NODE_PATH="lib"; node build/state-docs
 
-**Convert any CIF to BinaryCIF**
+**Convert any CIF to BinaryCIF (or vice versa)**
 
-    node lib/servers/model/preprocess -i file.cif -ob file.bcif
+    node lib/commonjs/servers/model/preprocess -i file.cif -ob file.bcif
 
-To see all available commands, use ``node lib/servers/model/preprocess -h``.
+To see all available commands, use ``node lib/commonjs/servers/model/preprocess -h``.
 
 Or
 
     node lib/commonjs/cli/cif2bcif
+
+E.g.
+
+    node lib/commonjs/cli/cif2bcif src.cif out.bcif.gz
+    node lib/commonjs/cli/cif2bcif src.bcif.gz out.cif
 
 ## Development
 
@@ -141,13 +171,12 @@ If node complains about a missing acorn peer dependency, run the following comma
 
 ### Editor
 
-To get syntax highlighting for shader and graphql files add the following to Visual Code's settings files and make sure relevant extensions are installed in the editor.
+To get syntax highlighting for shader files add the following to Visual Code's settings files and make sure relevant extensions are installed in the editor.
 
     "files.associations": {
         "*.glsl.ts": "glsl",
         "*.frag.ts": "glsl",
-        "*.vert.ts": "glsl",
-        "*.gql.ts": "graphql"
+        "*.vert.ts": "glsl"
     },
 
 ## Publish
@@ -161,9 +190,14 @@ To get syntax highlighting for shader and graphql files add the following to Vis
     npm publish
 
 ## Deploy
+To prepare apps and demos for https://molstar.org deploy, run:
+
     npm run test
-    npm run build
-    node ./scripts/deploy.js # currently updates the viewer on molstar.org/viewer
+    npm run deploy:local
+
+To commit these changes remotely to the `molstar/molstar.github.io` repo:
+
+    npm run deploy:remote
 
 ## Contributing
 Just open an issue or make a pull request. All contributions are welcome.

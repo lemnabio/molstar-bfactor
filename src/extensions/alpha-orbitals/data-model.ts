@@ -22,7 +22,7 @@ export interface SphericalElectronShell {
 export interface Basis {
     atoms: {
         // in Bohr units!
-        center: Vec3;
+        center: [number, number, number];
         shells: SphericalElectronShell[];
     }[];
 }
@@ -62,7 +62,6 @@ export interface CubeGrid {
 
 export type CubeGridFormat = ModelFormat<CubeGrid>;
 
-// eslint-disable-next-line
 export function CubeGridFormat(grid: CubeGrid): CubeGridFormat {
     return { name: 'custom grid', kind: 'cube-grid', data: grid };
 }
@@ -78,7 +77,7 @@ export function initCubeGrid(params: CubeGridComputationParams): CubeGridInfo {
     const count = geometry.length;
     const box = Box3D.expand(
         Box3D(),
-        Box3D.fromVec3Array(Box3D(), geometry),
+        Box3D.fromVec3Array(Box3D(), geometry as unknown as Vec3[]),
         Vec3.create(expand, expand, expand)
     );
     const size = Box3D.size(Vec3(), box);

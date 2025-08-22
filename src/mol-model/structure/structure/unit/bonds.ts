@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2017-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Paul Pillot <paul.pillot@tandemai.com>
  */
 
 import { Unit, StructureElement } from '../../structure';
@@ -165,9 +166,11 @@ namespace Bond {
 
     export function getIntraUnitBondCount(structure: Structure) {
         let count = 0;
-        for (let i = 0, il = structure.units.length; i < il; ++i) {
-            const u = structure.units[i];
-            if (Unit.isAtomic(u)) count += u.bonds.edgeCount;
+        for (const ug of structure.unitSymmetryGroups) {
+            const u = ug.units[0];
+            if (Unit.isAtomic(u)) {
+                count += u.bonds.edgeCount * ug.units.length;
+            }
         }
         return count;
     }
@@ -180,18 +183,18 @@ namespace Bond {
     }
 
     export class ElementBondIterator implements Iterator<ElementBondData> {
-        private current: ElementBondData = {} as any
+        private current: ElementBondData = {} as any;
 
-        private structure: Structure
-        private unit: Unit.Atomic
-        private index: StructureElement.UnitIndex
+        private structure: Structure;
+        private unit: Unit.Atomic;
+        private index: StructureElement.UnitIndex;
 
-        private interBondIndices: ReadonlyArray<number>
-        private interBondCount: number
-        private interBondIndex: number
+        private interBondIndices: ReadonlyArray<number>;
+        private interBondCount: number;
+        private interBondIndex: number;
 
-        private intraBondEnd: number
-        private intraBondIndex: number
+        private intraBondEnd: number;
+        private intraBondIndex: number;
 
         hasNext: boolean;
         move(): ElementBondData {
@@ -222,7 +225,7 @@ namespace Bond {
                 this.current.order = this.unit.bonds.edgeProps.order[this.intraBondIndex];
                 this.intraBondIndex += 1;
             } else if (this.interBondIndex < this.interBondCount) {
-                const b = this.structure.interUnitBonds.edges[this.interBondIndex];
+                const b = this.structure.interUnitBonds.edges[this.interBondIndices[this.interBondIndex]];
                 this.current.otherUnit = this.structure.unitMap.get(b.unitA !== this.unit.id ? b.unitA : b.unitB) as Unit.Atomic;
                 this.current.otherIndex = b.indexA !== this.index ? b.indexA : b.indexB;
                 this.current.type = b.props.flag;

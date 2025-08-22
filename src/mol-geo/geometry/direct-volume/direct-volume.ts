@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -26,8 +26,9 @@ import { TransformData } from '../transform-data';
 import { createEmptyTransparency } from '../transparency-data';
 import { createTransferFunctionTexture, getControlPointsFromVec2Array } from './transfer-function';
 import { createEmptyClipping } from '../clipping-data';
-import { Grid, Volume } from '../../../mol-model/volume';
-import { ColorNames } from '../../../mol-util/color/names';
+import { Grid } from '../../../mol-model/volume';
+import { createEmptySubstance } from '../substance-data';
+import { createEmptyEmissive } from '../emissive-data';
 
 const VolumeBox = Box();
 
@@ -47,18 +48,25 @@ export interface DirectVolume {
     readonly unitToCartn: ValueCell<Mat4>
     readonly cartnToUnit: ValueCell<Mat4>
     readonly packedGroup: ValueCell<boolean>
+    readonly axisOrder: ValueCell<Vec3>
+    readonly dataType: ValueCell<'byte' | 'float' | 'halfFloat'>
 
     /** Bounding sphere of the volume */
     readonly boundingSphere: Sphere3D
 
     setBoundingSphere(boundingSphere: Sphere3D): void
+
+    readonly meta: {
+        /** Called to restore when a webgl context is lost */
+        reset?: () => void
+    }
 }
 
 export namespace DirectVolume {
-    export function create(bbox: Box3D, gridDimension: Vec3, transform: Mat4, unitToCartn: Mat4, cellDim: Vec3, texture: Texture, stats: Grid['stats'], packedGroup: boolean, directVolume?: DirectVolume): DirectVolume {
+    export function create(bbox: Box3D, gridDimension: Vec3, transform: Mat4, unitToCartn: Mat4, cellDim: Vec3, texture: Texture, stats: Grid['stats'], packedGroup: boolean, axisOrder: Vec3, dataType: 'byte' | 'float' | 'halfFloat', directVolume?: DirectVolume): DirectVolume {
         return directVolume ?
-            update(bbox, gridDimension, transform, unitToCartn, cellDim, texture, stats, packedGroup, directVolume) :
-            fromData(bbox, gridDimension, transform, unitToCartn, cellDim, texture, stats, packedGroup);
+            update(bbox, gridDimension, transform, unitToCartn, cellDim, texture, stats, packedGroup, axisOrder, dataType, directVolume) :
+            fromData(bbox, gridDimension, transform, unitToCartn, cellDim, texture, stats, packedGroup, axisOrder, dataType);
     }
 
     function hashCode(directVolume: DirectVolume) {
@@ -69,7 +77,7 @@ export namespace DirectVolume {
         ]);
     }
 
-    function fromData(bbox: Box3D, gridDimension: Vec3, transform: Mat4, unitToCartn: Mat4, cellDim: Vec3, texture: Texture, stats: Grid['stats'], packedGroup: boolean): DirectVolume {
+    function fromData(bbox: Box3D, gridDimension: Vec3, transform: Mat4, unitToCartn: Mat4, cellDim: Vec3, texture: Texture, stats: Grid['stats'], packedGroup: boolean, axisOrder: Vec3, dataType: 'byte' | 'float' | 'halfFloat'): DirectVolume {
         const boundingSphere = Sphere3D();
         let currentHash = -1;
 
@@ -100,15 +108,18 @@ export namespace DirectVolume {
                 return boundingSphere;
             },
             packedGroup: ValueCell.create(packedGroup),
+            axisOrder: ValueCell.create(axisOrder),
+            dataType: ValueCell.create(dataType),
             setBoundingSphere(sphere: Sphere3D) {
                 Sphere3D.copy(boundingSphere, sphere);
                 currentHash = hashCode(directVolume);
-            }
+            },
+            meta: {}
         };
         return directVolume;
     }
 
-    function update(bbox: Box3D, gridDimension: Vec3, transform: Mat4, unitToCartn: Mat4, cellDim: Vec3, texture: Texture, stats: Grid['stats'], packedGroup: boolean, directVolume: DirectVolume): DirectVolume {
+    function update(bbox: Box3D, gridDimension: Vec3, transform: Mat4, unitToCartn: Mat4, cellDim: Vec3, texture: Texture, stats: Grid['stats'], packedGroup: boolean, axisOrder: Vec3, dataType: 'byte' | 'float' | 'halfFloat', directVolume: DirectVolume): DirectVolume {
         const width = texture.getWidth();
         const height = texture.getHeight();
         const depth = texture.getDepth();
@@ -125,6 +136,8 @@ export namespace DirectVolume {
         ValueCell.update(directVolume.unitToCartn, unitToCartn);
         ValueCell.update(directVolume.cartnToUnit, Mat4.invert(Mat4(), unitToCartn));
         ValueCell.updateIfChanged(directVolume.packedGroup, packedGroup);
+        ValueCell.updateIfChanged(directVolume.axisOrder, Vec3.fromArray(directVolume.axisOrder.ref.value, axisOrder, 0));
+        ValueCell.updateIfChanged(directVolume.dataType, dataType);
         return directVolume;
     }
 
@@ -137,47 +150,21 @@ export namespace DirectVolume {
         const texture = createNullTexture();
         const stats = Grid.One.stats;
         const packedGroup = false;
-        return create(bbox, gridDimension, transform, unitToCartn, cellDim, texture, stats, packedGroup, directVolume);
-    }
-
-    export function createRenderModeParam(stats?: Grid['stats']) {
-        const isoValueParam = stats
-            ? Volume.createIsoValueParam(Volume.IsoValue.relative(2), stats)
-            : Volume.IsoValueParam;
-
-        return PD.MappedStatic('volume', {
-            isosurface: PD.Group({
-                isoValue: isoValueParam,
-                singleLayer: PD.Boolean(false, { isEssential: true }),
-            }, { isFlat: true }),
-            volume: PD.Group({
-                controlPoints: PD.LineGraph([
-                    Vec2.create(0.19, 0.0), Vec2.create(0.2, 0.05), Vec2.create(0.25, 0.05), Vec2.create(0.26, 0.0),
-                    Vec2.create(0.79, 0.0), Vec2.create(0.8, 0.05), Vec2.create(0.85, 0.05), Vec2.create(0.86, 0.0),
-                ]),
-                list: PD.ColorList({
-                    kind: 'interpolate',
-                    colors: [
-                        [ColorNames.white, 0],
-                        [ColorNames.red, 0.25],
-                        [ColorNames.white, 0.5],
-                        [ColorNames.blue, 0.75],
-                        [ColorNames.white, 1]
-                    ]
-                }, { offsets: true }),
-            }, { isFlat: true })
-        }, { isEssential: true });
+        const axisOrder = Vec3.create(0, 1, 2);
+        const dataType = 'byte';
+        return create(bbox, gridDimension, transform, unitToCartn, cellDim, texture, stats, packedGroup, axisOrder, dataType, directVolume);
     }
 
     export const Params = {
         ...BaseGeometry.Params,
-        doubleSided: PD.Boolean(false, BaseGeometry.CustomQualityParamInfo),
-        flipSided: PD.Boolean(false, BaseGeometry.ShadingCategory),
-        flatShaded: PD.Boolean(false, BaseGeometry.ShadingCategory),
         ignoreLight: PD.Boolean(false, BaseGeometry.ShadingCategory),
-        xrayShaded: PD.Boolean(false, BaseGeometry.ShadingCategory),
-        renderMode: createRenderModeParam(),
-        stepsPerCell: PD.Numeric(5, { min: 1, max: 20, step: 1 }),
+        celShaded: PD.Boolean(false, BaseGeometry.ShadingCategory),
+        xrayShaded: PD.Select<boolean | 'inverted'>(false, [[false, 'Off'], [true, 'On'], ['inverted', 'Inverted']], BaseGeometry.ShadingCategory),
+        controlPoints: PD.LineGraph([
+            Vec2.create(0.19, 0.0), Vec2.create(0.2, 0.05), Vec2.create(0.25, 0.05), Vec2.create(0.26, 0.0),
+            Vec2.create(0.79, 0.0), Vec2.create(0.8, 0.05), Vec2.create(0.85, 0.05), Vec2.create(0.86, 0.0),
+        ], { isEssential: true }),
+        stepsPerCell: PD.Numeric(3, { min: 1, max: 10, step: 1 }),
         jumpLength: PD.Numeric(0, { min: 0, max: 20, step: 0.1 }),
     };
     export type Params = typeof Params
@@ -216,13 +203,6 @@ export namespace DirectVolume {
         return LocationIterator(groupCount, instanceCount, 1, getLocation);
     }
 
-    function getNormalizedIsoValue(out: Vec2, isoValue: Volume.IsoValue, stats: Vec4) {
-        const [min, max, mean, sigma] = stats;
-        const value = Volume.IsoValue.toAbsolute(isoValue, { min, max, mean, sigma }).absoluteValue;
-        Vec2.set(out, (value - min) / (max - min), (0 - min) / (max - min));
-        return out;
-    }
-
     function getMaxSteps(gridDim: Vec3, stepsPerCell: number) {
         return Math.ceil(Vec3.magnitude(gridDim) * stepsPerCell);
     }
@@ -240,36 +220,36 @@ export namespace DirectVolume {
         const { bboxSize, bboxMin, bboxMax, gridDimension, transform: gridTransform } = directVolume;
 
         const { instanceCount, groupCount } = locationIt;
-        const positionIt = Utils.createPositionIterator(directVolume, transform);
+        const positionIt = createPositionIterator(directVolume, transform);
 
         const color = createColors(locationIt, positionIt, theme.color);
-        const marker = createMarkers(instanceCount * groupCount);
+        const marker = props.instanceGranularity
+            ? createMarkers(instanceCount, 'instance')
+            : createMarkers(instanceCount * groupCount, 'groupInstance');
         const overpaint = createEmptyOverpaint();
         const transparency = createEmptyTransparency();
+        const emissive = createEmptyEmissive();
+        const material = createEmptySubstance();
         const clipping = createEmptyClipping();
 
         const [x, y, z] = gridDimension.ref.value;
         const counts = { drawCount: VolumeBox.indices.length, vertexCount: x * y * z, groupCount, instanceCount };
 
         const invariantBoundingSphere = Sphere3D.clone(directVolume.boundingSphere);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, transform.aTransform.ref.value, instanceCount, 0);
 
-        const controlPoints = props.renderMode.name === 'volume' ? getControlPointsFromVec2Array(props.renderMode.params.controlPoints) : [];
-        const transferTex = createTransferFunctionTexture(controlPoints, props.renderMode.name === 'volume' ? props.renderMode.params.list.colors : []);
-
-        const isoValue = props.renderMode.name === 'isosurface'
-            ? props.renderMode.params.isoValue
-            : Volume.IsoValue.relative(2);
-
-        const singleLayer = props.renderMode.name === 'isosurface'
-            ? props.renderMode.params.singleLayer
-            : false;
+        const controlPoints = getControlPointsFromVec2Array(props.controlPoints);
+        const transferTex = createTransferFunctionTexture(controlPoints);
 
         return {
+            dGeometryType: ValueCell.create('directVolume'),
+
             ...color,
             ...marker,
             ...overpaint,
             ...transparency,
+            ...emissive,
+            ...material,
             ...clipping,
             ...transform,
             ...BaseGeometry.createValues(props, counts),
@@ -280,7 +260,6 @@ export namespace DirectVolume {
             invariantBoundingSphere: ValueCell.create(invariantBoundingSphere),
             uInvariantBoundingSphere: ValueCell.create(Vec4.ofSphere(invariantBoundingSphere)),
 
-            uIsoValue: ValueCell.create(getNormalizedIsoValue(Vec2(), isoValue, directVolume.gridStats.ref.value)),
             uBboxMin: bboxMin,
             uBboxMax: bboxMax,
             uBboxSize: bboxSize,
@@ -289,7 +268,6 @@ export namespace DirectVolume {
             uJumpLength: ValueCell.create(props.jumpLength),
             uTransform: gridTransform,
             uGridDim: gridDimension,
-            dRenderMode: ValueCell.create(props.renderMode.name),
             tTransferTex: transferTex,
             uTransferScale: ValueCell.create(getTransferScale(props.stepsPerCell)),
 
@@ -302,13 +280,13 @@ export namespace DirectVolume {
             uCartnToUnit: directVolume.cartnToUnit,
             uUnitToCartn: directVolume.unitToCartn,
             dPackedGroup: directVolume.packedGroup,
-            dSingleLayer: ValueCell.create(singleLayer),
+            dAxisOrder: ValueCell.create(directVolume.axisOrder.ref.value.join('')),
 
-            dDoubleSided: ValueCell.create(props.doubleSided),
-            dFlatShaded: ValueCell.create(props.flatShaded),
-            dFlipSided: ValueCell.create(props.flipSided),
             dIgnoreLight: ValueCell.create(props.ignoreLight),
-            dXrayShaded: ValueCell.create(props.xrayShaded),
+            dCelShaded: ValueCell.create(props.celShaded),
+            dXrayShaded: ValueCell.create(props.xrayShaded === 'inverted' ? 'inverted' : props.xrayShaded === true ? 'on' : 'off'),
+
+            meta: ValueCell.create(directVolume.meta),
         };
     }
 
@@ -319,22 +297,13 @@ export namespace DirectVolume {
     }
 
     function updateValues(values: DirectVolumeValues, props: PD.Values<Params>) {
-        ValueCell.updateIfChanged(values.alpha, props.alpha);
-        ValueCell.updateIfChanged(values.uAlpha, props.alpha);
-        ValueCell.updateIfChanged(values.dDoubleSided, props.doubleSided);
-        ValueCell.updateIfChanged(values.dFlatShaded, props.flatShaded);
-        ValueCell.updateIfChanged(values.dFlipSided, props.flipSided);
+        BaseGeometry.updateValues(values, props);
         ValueCell.updateIfChanged(values.dIgnoreLight, props.ignoreLight);
-        ValueCell.updateIfChanged(values.dXrayShaded, props.xrayShaded);
-        ValueCell.updateIfChanged(values.dRenderMode, props.renderMode.name);
+        ValueCell.updateIfChanged(values.dCelShaded, props.celShaded);
+        ValueCell.updateIfChanged(values.dXrayShaded, props.xrayShaded === 'inverted' ? 'inverted' : props.xrayShaded === true ? 'on' : 'off');
 
-        if (props.renderMode.name === 'isosurface') {
-            ValueCell.updateIfChanged(values.uIsoValue, getNormalizedIsoValue(values.uIsoValue.ref.value, props.renderMode.params.isoValue, values.uGridStats.ref.value));
-            ValueCell.updateIfChanged(values.dSingleLayer, props.renderMode.params.singleLayer);
-        } else if (props.renderMode.name === 'volume') {
-            const controlPoints = getControlPointsFromVec2Array(props.renderMode.params.controlPoints);
-            createTransferFunctionTexture(controlPoints, props.renderMode.params.list.colors, values.tTransferTex);
-        }
+        const controlPoints = getControlPointsFromVec2Array(props.controlPoints);
+        createTransferFunctionTexture(controlPoints, values.tTransferTex);
 
         ValueCell.updateIfChanged(values.uMaxSteps, getMaxSteps(values.uGridDim.ref.value, props.stepsPerCell));
         ValueCell.updateIfChanged(values.uStepScale, getStepScale(values.uCellDim.ref.value, props.stepsPerCell));
@@ -344,7 +313,7 @@ export namespace DirectVolume {
 
     function updateBoundingSphere(values: DirectVolumeValues, directVolume: DirectVolume) {
         const invariantBoundingSphere = Sphere3D.clone(directVolume.boundingSphere);
-        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value);
+        const boundingSphere = calculateTransformBoundingSphere(invariantBoundingSphere, values.aTransform.ref.value, values.instanceCount.ref.value, 0);
 
         if (!Sphere3D.equals(boundingSphere, values.boundingSphere.ref.value)) {
             ValueCell.update(values.boundingSphere, boundingSphere);
@@ -358,14 +327,14 @@ export namespace DirectVolume {
     function createRenderableState(props: PD.Values<Params>): RenderableState {
         const state = BaseGeometry.createRenderableState(props);
         state.opaque = false;
-        state.writeDepth = props.renderMode.name === 'isosurface';
+        state.writeDepth = false;
         return state;
     }
 
     function updateRenderableState(state: RenderableState, props: PD.Values<Params>) {
         BaseGeometry.updateRenderableState(state, props);
         state.opaque = false;
-        state.writeDepth = props.renderMode.name === 'isosurface';
+        state.writeDepth = false;
     }
 }
 

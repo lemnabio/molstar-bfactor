@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2022 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -99,7 +99,7 @@ function getFocusEntries(structure: Structure) {
 }
 
 export class StructureFocusControls extends PluginUIComponent<{}, StructureFocusControlsState> {
-    state = { isBusy: false, showAction: false }
+    state = { isBusy: false, showAction: false };
 
     componentDidMount() {
         this.subscribe(this.plugin.managers.structure.focus.behaviors.current, c => {
@@ -118,7 +118,7 @@ export class StructureFocusControls extends PluginUIComponent<{}, StructureFocus
     }
 
     get isDisabled() {
-        return this.state.isBusy || this.actionItems.length === 0;
+        return this.state.isBusy || this.plugin.managers.structure.hierarchy.selection.structures.length === 0;
     }
 
     getSelectionItems = memoizeLatest((structures: ReadonlyArray<StructureRef>) => {
@@ -185,28 +185,28 @@ export class StructureFocusControls extends PluginUIComponent<{}, StructureFocus
             this.plugin.managers.structure.focus.set(f);
         }
         this.focusCamera();
-    }
+    };
 
-    toggleAction = () => this.setState({ showAction: !this.state.showAction })
+    toggleAction = () => this.setState({ showAction: !this.state.showAction });
 
     focusCamera = () => {
         const { current } = this.plugin.managers.structure.focus;
         if (current) this.plugin.managers.camera.focusLoci(current.loci);
-    }
+    };
 
     clear = () => {
         this.plugin.managers.structure.focus.clear();
         this.plugin.managers.camera.reset();
-    }
+    };
 
     highlightCurrent = () => {
         const { current } = this.plugin.managers.structure.focus;
         if (current) this.plugin.managers.interactivity.lociHighlights.highlightOnly({ loci: current.loci }, false);
-    }
+    };
 
     clearHighlights = () => {
         this.plugin.managers.interactivity.lociHighlights.clearHighlights();
-    }
+    };
 
     getToggleBindingLabel() {
         const t = this.plugin.state.behaviors.transforms.get(FocusLoci.id) as StateTransform<typeof FocusLoci>;

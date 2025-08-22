@@ -9,8 +9,9 @@ import { EmptyLoci } from '../../mol-model/loci';
 import { StructureSelection } from '../../mol-model/structure';
 import { AnimateModelIndex } from '../../mol-plugin-state/animation/built-in/model-index';
 import { BuiltInTrajectoryFormat } from '../../mol-plugin-state/formats/trajectory';
-import { createPlugin } from '../../mol-plugin-ui';
+import { createPluginUI } from '../../mol-plugin-ui';
 import { PluginUIContext } from '../../mol-plugin-ui/context';
+import { renderReact18 } from '../../mol-plugin-ui/react18';
 import { DefaultPluginUISpec } from '../../mol-plugin-ui/spec';
 import { PluginCommands } from '../../mol-plugin/commands';
 import { Script } from '../../mol-script/script';
@@ -21,24 +22,28 @@ import { CustomToastMessage } from './controls';
 import { CustomColorThemeProvider } from './custom-theme';
 import './index.html';
 import { buildStaticSuperposition, dynamicSuperpositionTest, StaticSuperpositionTestData } from './superposition';
-require('mol-plugin-ui/skin/light.scss');
+import '../../mol-plugin-ui/skin/light.scss';
 
 type LoadParams = { url: string, format?: BuiltInTrajectoryFormat, isBinary?: boolean, assemblyId?: string }
 
 class BasicWrapper {
     plugin: PluginUIContext;
 
-    init(target: string | HTMLElement) {
-        this.plugin = createPlugin(typeof target === 'string' ? document.getElementById(target)! : target, {
-            ...DefaultPluginUISpec(),
-            layout: {
-                initial: {
-                    isExpanded: false,
-                    showControls: false
+    async init(target: string | HTMLElement) {
+        this.plugin = await createPluginUI({
+            target: typeof target === 'string' ? document.getElementById(target)! : target,
+            render: renderReact18,
+            spec: {
+                ...DefaultPluginUISpec(),
+                layout: {
+                    initial: {
+                        isExpanded: false,
+                        showControls: false
+                    }
+                },
+                components: {
+                    remoteState: 'none'
                 }
-            },
-            components: {
-                remoteState: 'none'
             }
         });
 
@@ -46,6 +51,14 @@ class BasicWrapper {
         this.plugin.representation.structure.themes.colorThemeRegistry.add(CustomColorThemeProvider);
         this.plugin.managers.lociLabels.addProvider(StripedResidues.labelProvider!);
         this.plugin.customModelProperties.register(StripedResidues.propertyProvider, true);
+
+        this.plugin.managers.dragAndDrop.addHandler('custom-wrapper', (files) => {
+            if (files.some(f => f.name.toLowerCase().endsWith('.testext'))) {
+                console.log('.testext File dropped');
+                return true;
+            }
+            return false;
+        });
     }
 
     async load({ url, format = 'mmcif', isBinary = false, assemblyId = '' }: LoadParams) {
@@ -60,7 +73,7 @@ class BasicWrapper {
                 params: { id: assemblyId }
             } : {
                 name: 'model',
-                params: { }
+                params: {}
             },
             showUnitcell: false,
             representationPreset: 'auto'
@@ -74,12 +87,20 @@ class BasicWrapper {
     toggleSpin() {
         if (!this.plugin.canvas3d) return;
 
+        const trackball = this.plugin.canvas3d.props.trackball;
         PluginCommands.Canvas3D.SetSettings(this.plugin, {
-            settings: props => {
-                props.trackball.spin = !props.trackball.spin;
+            settings: {
+                trackball: {
+                    ...trackball,
+                    animate: trackball.animate.name === 'spin'
+                        ? { name: 'off', params: {} }
+                        : { name: 'spin', params: { speed: 1 } }
+                }
             }
         });
-        if (!this.plugin.canvas3d.props.trackball.spin) PluginCommands.Camera.Reset(this.plugin, {});
+        if (this.plugin.canvas3d.props.trackball.animate.name !== 'spin') {
+            PluginCommands.Camera.Reset(this.plugin, {});
+        }
     }
 
     private animateModelIndexTargetFps() {
@@ -95,7 +116,7 @@ class BasicWrapper {
             loop: () => { this.plugin.managers.animation.play(AnimateModelIndex, { duration: { name: 'computed', params: { targetFps: this.animateModelIndexTargetFps() } }, mode: { name: 'loop', params: { direction: 'forward' } } }); },
             stop: () => this.plugin.managers.animation.stop()
         }
-    }
+    };
 
     coloring = {
         applyStripes: async () => {
@@ -119,7 +140,7 @@ class BasicWrapper {
                 }
             });
         }
-    }
+    };
 
     interactivity = {
         highlightOn: () => {
@@ -137,7 +158,7 @@ class BasicWrapper {
         clearHighlight: () => {
             this.plugin.managers.interactivity.lociHighlights.highlightOnly({ loci: EmptyLoci });
         }
-    }
+    };
 
     tests = {
         staticSuperposition: async () => {
@@ -168,7 +189,7 @@ class BasicWrapper {
             PluginCommands.Toast.Hide(this.plugin, { key: 'toast-1' });
             PluginCommands.Toast.Hide(this.plugin, { key: 'toast-2' });
         }
-    }
+    };
 }
 
 (window as any).BasicMolStarWrapper = new BasicWrapper();

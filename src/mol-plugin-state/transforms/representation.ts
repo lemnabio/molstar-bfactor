@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -9,7 +9,6 @@ import { Structure, StructureElement } from '../../mol-model/structure';
 import { Volume } from '../../mol-model/volume';
 import { PluginContext } from '../../mol-plugin/context';
 import { VolumeRepresentationRegistry } from '../../mol-repr/volume/registry';
-import { VolumeParams } from '../../mol-repr/volume/representation';
 import { StateTransformer, StateObject } from '../../mol-state';
 import { Task } from '../../mol-task';
 import { ColorTheme } from '../../mol-theme/color';
@@ -24,11 +23,11 @@ import { unwindStructureAssembly, explodeStructure, spinStructure, SpinStructure
 import { Color } from '../../mol-util/color';
 import { Overpaint } from '../../mol-theme/overpaint';
 import { Transparency } from '../../mol-theme/transparency';
-import { BaseGeometry } from '../../mol-geo/geometry/base';
+import { BaseGeometry, hasColorSmoothingProp } from '../../mol-geo/geometry/base';
 import { Script } from '../../mol-script/script';
 import { UnitcellParams, UnitcellRepresentation, getUnitcellData } from '../../mol-repr/shape/model/unitcell';
 import { DistanceParams, DistanceRepresentation } from '../../mol-repr/shape/loci/distance';
-import { getDistanceDataFromStructureSelections, getLabelDataFromStructureSelections, getOrientationDataFromStructureSelections, getAngleDataFromStructureSelections, getDihedralDataFromStructureSelections } from './helpers';
+import { getDistanceDataFromStructureSelections, getLabelDataFromStructureSelections, getOrientationDataFromStructureSelections, getAngleDataFromStructureSelections, getDihedralDataFromStructureSelections, getPlaneDataFromStructureSelections } from './helpers';
 import { LabelParams, LabelRepresentation } from '../../mol-repr/shape/loci/label';
 import { OrientationRepresentation, OrientationParams } from '../../mol-repr/shape/loci/orientation';
 import { AngleParams, AngleRepresentation } from '../../mol-repr/shape/loci/angle';
@@ -40,6 +39,12 @@ import { Mesh } from '../../mol-geo/geometry/mesh/mesh';
 import { getBoxMesh } from './shape';
 import { Shape } from '../../mol-model/shape';
 import { Box3D } from '../../mol-math/geometry';
+import { PlaneParams, PlaneRepresentation } from '../../mol-repr/shape/loci/plane';
+import { Substance } from '../../mol-theme/substance';
+import { Material } from '../../mol-util/material';
+import { lerp } from '../../mol-math/interpolate';
+import { MarkerAction, MarkerActions } from '../../mol-util/marker-action';
+import { Emissive } from '../../mol-theme/emissive';
 
 export { StructureRepresentation3D };
 export { ExplodeStructureRepresentation3D };
@@ -49,8 +54,13 @@ export { OverpaintStructureRepresentation3DFromScript };
 export { OverpaintStructureRepresentation3DFromBundle };
 export { TransparencyStructureRepresentation3DFromScript };
 export { TransparencyStructureRepresentation3DFromBundle };
+export { EmissiveStructureRepresentation3DFromScript };
+export { EmissiveStructureRepresentation3DFromBundle };
+export { SubstanceStructureRepresentation3DFromScript };
+export { SubstanceStructureRepresentation3DFromBundle };
 export { ClippingStructureRepresentation3DFromScript };
 export { ClippingStructureRepresentation3DFromBundle };
+export { ThemeStrengthRepresentation3D };
 export { VolumeRepresentation3D };
 
 type StructureRepresentation3D = typeof StructureRepresentation3D
@@ -115,7 +125,7 @@ const StructureRepresentation3D = PluginStateTransform.BuiltIn({
             ),
             sizeTheme: PD.Mapped<any>(
                 type.defaultSizeTheme.name,
-                themeCtx.sizeThemeRegistry.types,
+                themeCtx.sizeThemeRegistry.getApplicableTypes(dataCtx),
                 name => PD.Group<any>(themeCtx.sizeThemeRegistry.get(name).getParams(dataCtx))
             )
         });
@@ -129,7 +139,7 @@ const StructureRepresentation3D = PluginStateTransform.BuiltIn({
     },
     apply({ a, params, cache }, plugin: PluginContext) {
         return Task.create('Structure Representation', async ctx => {
-            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset };
+            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset, errorContext: plugin.errorContext };
             const provider = plugin.representation.structure.registry.get(params.type.name);
             const data = provider.getData?.(a.data, params.type.params) || a.data;
             if (provider.ensureCustomProperties) await provider.ensureCustomProperties.attach(propertyCtx, data);
@@ -150,7 +160,7 @@ const StructureRepresentation3D = PluginStateTransform.BuiltIn({
             if (provider.mustRecreate?.(oldParams.type.params, newParams.type.params)) return StateTransformer.UpdateResult.Recreate;
 
             const data = provider.getData?.(a.data, newParams.type.params) || a.data;
-            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset };
+            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset, errorContext: plugin.errorContext };
             if (provider.ensureCustomProperties) await provider.ensureCustomProperties.attach(propertyCtx, data);
 
             // TODO: if themes had a .needsUpdate method the following block could
@@ -327,25 +337,31 @@ const OverpaintStructureRepresentation3DFromScript = PluginStateTransform.BuiltI
     },
     apply({ a, params }) {
         const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
         const overpaint = Overpaint.ofScript(params.layers, structure);
 
         return new SO.Molecule.Structure.Representation3DState({
             state: { overpaint },
             initialState: { overpaint: Overpaint.Empty },
-            info: structure,
+            info: { structure, geometryVersion },
             repr: a.data.repr
         }, { label: `Overpaint (${overpaint.layers.length} Layers)` });
     },
     update({ a, b, newParams, oldParams }) {
-        const oldStructure = b.data.info as Structure;
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
         const newStructure = a.data.sourceData;
-        if (newStructure !== oldStructure) return StateTransformer.UpdateResult.Recreate;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
         if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
+
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
 
         const oldOverpaint = b.data.state.overpaint!;
         const newOverpaint = Overpaint.ofScript(newParams.layers, newStructure);
         if (Overpaint.areEqual(oldOverpaint, newOverpaint)) return StateTransformer.UpdateResult.Unchanged;
 
+        info.geometryVersion = newGeometryVersion;
         b.data.state.overpaint = newOverpaint;
         b.data.repr = a.data.repr;
         b.label = `Overpaint (${newOverpaint.layers.length} Layers)`;
@@ -379,25 +395,31 @@ const OverpaintStructureRepresentation3DFromBundle = PluginStateTransform.BuiltI
     },
     apply({ a, params }) {
         const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
         const overpaint = Overpaint.ofBundle(params.layers, structure);
 
         return new SO.Molecule.Structure.Representation3DState({
             state: { overpaint },
             initialState: { overpaint: Overpaint.Empty },
-            info: structure,
+            info: { structure, geometryVersion },
             repr: a.data.repr
         }, { label: `Overpaint (${overpaint.layers.length} Layers)` });
     },
     update({ a, b, newParams, oldParams }) {
-        const oldStructure = b.data.info as Structure;
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
         const newStructure = a.data.sourceData;
-        if (newStructure !== oldStructure) return StateTransformer.UpdateResult.Recreate;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
         if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
+
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
 
         const oldOverpaint = b.data.state.overpaint!;
         const newOverpaint = Overpaint.ofBundle(newParams.layers, newStructure);
         if (Overpaint.areEqual(oldOverpaint, newOverpaint)) return StateTransformer.UpdateResult.Unchanged;
 
+        info.geometryVersion = newGeometryVersion;
         b.data.state.overpaint = newOverpaint;
         b.data.repr = a.data.repr;
         b.label = `Overpaint (${newOverpaint.layers.length} Layers)`;
@@ -428,24 +450,31 @@ const TransparencyStructureRepresentation3DFromScript = PluginStateTransform.Bui
     },
     apply({ a, params }) {
         const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
         const transparency = Transparency.ofScript(params.layers, structure);
 
         return new SO.Molecule.Structure.Representation3DState({
             state: { transparency },
             initialState: { transparency: Transparency.Empty },
-            info: structure,
+            info: { structure, geometryVersion },
             repr: a.data.repr
         }, { label: `Transparency (${transparency.layers.length} Layers)` });
     },
     update({ a, b, newParams, oldParams }) {
-        const structure = b.data.info as Structure;
-        if (a.data.sourceData !== structure) return StateTransformer.UpdateResult.Recreate;
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
+        const newStructure = a.data.sourceData;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
         if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
 
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
+
         const oldTransparency = b.data.state.transparency!;
-        const newTransparency = Transparency.ofScript(newParams.layers, structure);
+        const newTransparency = Transparency.ofScript(newParams.layers, newStructure);
         if (Transparency.areEqual(oldTransparency, newTransparency)) return StateTransformer.UpdateResult.Unchanged;
 
+        info.geometryVersion = newGeometryVersion;
         b.data.state.transparency = newTransparency;
         b.data.repr = a.data.repr;
         b.label = `Transparency (${newTransparency.layers.length} Layers)`;
@@ -477,27 +506,261 @@ const TransparencyStructureRepresentation3DFromBundle = PluginStateTransform.Bui
     },
     apply({ a, params }) {
         const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
         const transparency = Transparency.ofBundle(params.layers, structure);
 
         return new SO.Molecule.Structure.Representation3DState({
             state: { transparency },
             initialState: { transparency: Transparency.Empty },
-            info: structure,
+            info: { structure, geometryVersion },
             repr: a.data.repr
         }, { label: `Transparency (${transparency.layers.length} Layers)` });
     },
     update({ a, b, newParams, oldParams }) {
-        const structure = b.data.info as Structure;
-        if (a.data.sourceData !== structure) return StateTransformer.UpdateResult.Recreate;
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
+        const newStructure = a.data.sourceData;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
         if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
 
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
+
         const oldTransparency = b.data.state.transparency!;
-        const newTransparency = Transparency.ofBundle(newParams.layers, structure);
+        const newTransparency = Transparency.ofBundle(newParams.layers, newStructure);
         if (Transparency.areEqual(oldTransparency, newTransparency)) return StateTransformer.UpdateResult.Unchanged;
 
+        info.geometryVersion = newGeometryVersion;
         b.data.state.transparency = newTransparency;
         b.data.repr = a.data.repr;
         b.label = `Transparency (${newTransparency.layers.length} Layers)`;
+        return StateTransformer.UpdateResult.Updated;
+    }
+});
+
+
+type EmissiveStructureRepresentation3DFromScript = typeof EmissiveStructureRepresentation3DFromScript
+const EmissiveStructureRepresentation3DFromScript = PluginStateTransform.BuiltIn({
+    name: 'emissive-structure-representation-3d-from-script',
+    display: 'Emissive 3D Representation',
+    from: SO.Molecule.Structure.Representation3D,
+    to: SO.Molecule.Structure.Representation3DState,
+    params: () => ({
+        layers: PD.ObjectList({
+            script: PD.Script(Script('(sel.atom.all)', 'mol-script')),
+            value: PD.Numeric(0.5, { min: 0, max: 1, step: 0.01 }, { label: 'Emissive' }),
+        }, e => `Emissive (${e.value})`, {
+            defaultValue: [{
+                script: Script('(sel.atom.all)', 'mol-script'),
+                value: 0.5,
+            }]
+        })
+    })
+})({
+    canAutoUpdate() {
+        return true;
+    },
+    apply({ a, params }) {
+        const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
+        const emissive = Emissive.ofScript(params.layers, structure);
+
+        return new SO.Molecule.Structure.Representation3DState({
+            state: { emissive },
+            initialState: { emissive: Emissive.Empty },
+            info: { structure, geometryVersion },
+            repr: a.data.repr
+        }, { label: `Emissive (${emissive.layers.length} Layers)` });
+    },
+    update({ a, b, newParams, oldParams }) {
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
+        const newStructure = a.data.sourceData;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
+        if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
+
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
+
+        const oldEmissive = b.data.state.emissive!;
+        const newEmissive = Emissive.ofScript(newParams.layers, newStructure);
+        if (Emissive.areEqual(oldEmissive, newEmissive)) return StateTransformer.UpdateResult.Unchanged;
+
+        info.geometryVersion = newGeometryVersion;
+        b.data.state.emissive = newEmissive;
+        b.data.repr = a.data.repr;
+        b.label = `Emissive (${newEmissive.layers.length} Layers)`;
+        return StateTransformer.UpdateResult.Updated;
+    }
+});
+
+type EmissiveStructureRepresentation3DFromBundle = typeof EmissiveStructureRepresentation3DFromBundle
+const EmissiveStructureRepresentation3DFromBundle = PluginStateTransform.BuiltIn({
+    name: 'emissive-structure-representation-3d-from-bundle',
+    display: 'Emissive 3D Representation',
+    from: SO.Molecule.Structure.Representation3D,
+    to: SO.Molecule.Structure.Representation3DState,
+    params: () => ({
+        layers: PD.ObjectList({
+            bundle: PD.Value<StructureElement.Bundle>(StructureElement.Bundle.Empty),
+            value: PD.Numeric(0.5, { min: 0, max: 1, step: 0.01 }, { label: 'Emissive' }),
+        }, e => `Emissive (${e.value})`, {
+            defaultValue: [{
+                bundle: StructureElement.Bundle.Empty,
+                value: 0.5,
+            }],
+            isHidden: true
+        })
+    })
+})({
+    canAutoUpdate() {
+        return true;
+    },
+    apply({ a, params }) {
+        const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
+        const emissive = Emissive.ofBundle(params.layers, structure);
+
+        return new SO.Molecule.Structure.Representation3DState({
+            state: { emissive },
+            initialState: { emissive: Emissive.Empty },
+            info: { structure, geometryVersion },
+            repr: a.data.repr
+        }, { label: `Emissive (${emissive.layers.length} Layers)` });
+    },
+    update({ a, b, newParams, oldParams }) {
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
+        const newStructure = a.data.sourceData;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
+        if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
+
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
+
+        const oldEmissive = b.data.state.emissive!;
+        const newEmissive = Emissive.ofBundle(newParams.layers, newStructure);
+        if (Emissive.areEqual(oldEmissive, newEmissive)) return StateTransformer.UpdateResult.Unchanged;
+
+        info.geometryVersion = newGeometryVersion;
+        b.data.state.emissive = newEmissive;
+        b.data.repr = a.data.repr;
+        b.label = `Emissive (${newEmissive.layers.length} Layers)`;
+        return StateTransformer.UpdateResult.Updated;
+    }
+});
+
+type SubstanceStructureRepresentation3DFromScript = typeof SubstanceStructureRepresentation3DFromScript
+const SubstanceStructureRepresentation3DFromScript = PluginStateTransform.BuiltIn({
+    name: 'substance-structure-representation-3d-from-script',
+    display: 'Substance 3D Representation',
+    from: SO.Molecule.Structure.Representation3D,
+    to: SO.Molecule.Structure.Representation3DState,
+    params: () => ({
+        layers: PD.ObjectList({
+            script: PD.Script(Script('(sel.atom.all)', 'mol-script')),
+            material: Material.getParam(),
+            clear: PD.Boolean(false)
+        }, e => `${e.clear ? 'Clear' : Material.toString(e.material)}`, {
+            defaultValue: [{
+                script: Script('(sel.atom.all)', 'mol-script'),
+                material: Material({ roughness: 1 }),
+                clear: false
+            }]
+        }),
+    })
+})({
+    canAutoUpdate() {
+        return true;
+    },
+    apply({ a, params }) {
+        const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
+        const substance = Substance.ofScript(params.layers, structure);
+
+        return new SO.Molecule.Structure.Representation3DState({
+            state: { substance },
+            initialState: { substance: Substance.Empty },
+            info: { structure, geometryVersion },
+            repr: a.data.repr
+        }, { label: `Substance (${substance.layers.length} Layers)` });
+    },
+    update({ a, b, newParams, oldParams }) {
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
+        const newStructure = a.data.sourceData;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
+        if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
+
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
+
+        const oldSubstance = b.data.state.substance!;
+        const newSubstance = Substance.ofScript(newParams.layers, newStructure);
+        if (Substance.areEqual(oldSubstance, newSubstance)) return StateTransformer.UpdateResult.Unchanged;
+
+        info.geometryVersion = newGeometryVersion;
+        b.data.state.substance = newSubstance;
+        b.data.repr = a.data.repr;
+        b.label = `Substance (${newSubstance.layers.length} Layers)`;
+        return StateTransformer.UpdateResult.Updated;
+    }
+});
+
+type SubstanceStructureRepresentation3DFromBundle = typeof SubstanceStructureRepresentation3DFromBundle
+const SubstanceStructureRepresentation3DFromBundle = PluginStateTransform.BuiltIn({
+    name: 'substance-structure-representation-3d-from-bundle',
+    display: 'Substance 3D Representation',
+    from: SO.Molecule.Structure.Representation3D,
+    to: SO.Molecule.Structure.Representation3DState,
+    params: () => ({
+        layers: PD.ObjectList({
+            bundle: PD.Value<StructureElement.Bundle>(StructureElement.Bundle.Empty),
+            material: Material.getParam(),
+            clear: PD.Boolean(false)
+        }, e => `${e.clear ? 'Clear' : Material.toString(e.material)}`, {
+            defaultValue: [{
+                bundle: StructureElement.Bundle.Empty,
+                material: Material({ roughness: 1 }),
+                clear: false
+            }],
+            isHidden: true
+        }),
+    })
+})({
+    canAutoUpdate() {
+        return true;
+    },
+    apply({ a, params }) {
+        const structure = a.data.sourceData;
+        const geometryVersion = a.data.repr.geometryVersion;
+        const substance = Substance.ofBundle(params.layers, structure);
+
+        return new SO.Molecule.Structure.Representation3DState({
+            state: { substance },
+            initialState: { substance: Substance.Empty },
+            info: { structure, geometryVersion },
+            repr: a.data.repr
+        }, { label: `Substance (${substance.layers.length} Layers)` });
+    },
+    update({ a, b, newParams, oldParams }) {
+        const info = b.data.info as { structure: Structure, geometryVersion: number };
+        const newStructure = a.data.sourceData;
+        if (newStructure !== info.structure) return StateTransformer.UpdateResult.Recreate;
+        if (a.data.repr !== b.data.repr) return StateTransformer.UpdateResult.Recreate;
+
+        const newGeometryVersion = a.data.repr.geometryVersion;
+        // smoothing needs to be re-calculated when geometry changes
+        if (newGeometryVersion !== info.geometryVersion && hasColorSmoothingProp(a.data.repr.props)) return StateTransformer.UpdateResult.Recreate;
+
+        const oldSubstance = b.data.state.substance!;
+        const newSubstance = Substance.ofBundle(newParams.layers, newStructure);
+        if (Substance.areEqual(oldSubstance, newSubstance)) return StateTransformer.UpdateResult.Unchanged;
+
+        info.geometryVersion = newGeometryVersion;
+        b.data.state.substance = newSubstance;
+        b.data.repr = a.data.repr;
+        b.label = `Substance (${newSubstance.layers.length} Layers)`;
         return StateTransformer.UpdateResult.Updated;
     }
 });
@@ -599,20 +862,80 @@ const ClippingStructureRepresentation3DFromBundle = PluginStateTransform.BuiltIn
     }
 });
 
+type ThemeStrengthRepresentation3D = typeof ThemeStrengthRepresentation3D
+const ThemeStrengthRepresentation3D = PluginStateTransform.BuiltIn({
+    name: 'theme-strength-representation-3d',
+    display: 'Theme Strength 3D Representation',
+    from: SO.Molecule.Structure.Representation3D,
+    to: SO.Molecule.Structure.Representation3DState,
+    params: () => ({
+        overpaintStrength: PD.Numeric(1, { min: 0, max: 1, step: 0.01 }),
+        transparencyStrength: PD.Numeric(1, { min: 0, max: 1, step: 0.01 }),
+        emissiveStrength: PD.Numeric(1, { min: 0, max: 1, step: 0.01 }),
+        substanceStrength: PD.Numeric(1, { min: 0, max: 1, step: 0.01 }),
+    })
+})({
+    canAutoUpdate() {
+        return true;
+    },
+    apply({ a, params }) {
+        return new SO.Molecule.Structure.Representation3DState({
+            state: {
+                themeStrength: {
+                    overpaint: params.overpaintStrength,
+                    transparency: params.transparencyStrength,
+                    emissive: params.emissiveStrength,
+                    substance: params.substanceStrength
+                },
+            },
+            initialState: {
+                themeStrength: { overpaint: 1, transparency: 1, emissive: 1, substance: 1 },
+            },
+            info: { },
+            repr: a.data.repr
+        }, { label: 'Theme Strength', description: `${params.overpaintStrength.toFixed(2)}, ${params.transparencyStrength.toFixed(2)}, ${params.emissiveStrength.toFixed(2)}, ${params.substanceStrength.toFixed(2)}` });
+    },
+    update({ a, b, newParams, oldParams }) {
+        if (newParams.overpaintStrength === b.data.state.themeStrength?.overpaint &&
+            newParams.transparencyStrength === b.data.state.themeStrength?.transparency &&
+            newParams.emissiveStrength === b.data.state.themeStrength?.emissive &&
+            newParams.substanceStrength === b.data.state.themeStrength?.substance
+        ) return StateTransformer.UpdateResult.Unchanged;
+
+        b.data.state.themeStrength = {
+            overpaint: newParams.overpaintStrength,
+            transparency: newParams.transparencyStrength,
+            emissive: newParams.emissiveStrength,
+            substance: newParams.substanceStrength,
+        };
+        b.data.repr = a.data.repr;
+        b.label = 'Theme Strength';
+        b.description = `${newParams.overpaintStrength.toFixed(2)}, ${newParams.transparencyStrength.toFixed(2)}, ${newParams.emissiveStrength.toFixed(2)}, ${newParams.substanceStrength.toFixed(2)}`;
+        return StateTransformer.UpdateResult.Updated;
+    },
+    interpolate(src, tar, t) {
+        return {
+            overpaintStrength: lerp(src.overpaintStrength, tar.overpaintStrength, t),
+            transparencyStrength: lerp(src.transparencyStrength, tar.transparencyStrength, t),
+            emissiveStrength: lerp(src.emissiveStrength, tar.emissiveStrength, t),
+            substanceStrength: lerp(src.substanceStrength, tar.substanceStrength, t),
+        };
+    }
+});
+
 //
 
 export namespace VolumeRepresentation3DHelpers {
-    export function getDefaultParams(ctx: PluginContext, name: VolumeRepresentationRegistry.BuiltIn, volume: Volume, volumeParams?: Partial<PD.Values<VolumeParams>>): StateTransformer.Params<VolumeRepresentation3D> {
+    export function getDefaultParams(ctx: PluginContext, name: VolumeRepresentationRegistry.BuiltIn, volume: Volume, volumeParams?: Partial<PD.Values<PD.Params>>, colorName?: ColorTheme.BuiltIn, colorParams?: Partial<ColorTheme.Props>, sizeName?: SizeTheme.BuiltIn, sizeParams?: Partial<SizeTheme.Props>): StateTransformer.Params<VolumeRepresentation3D> {
         const type = ctx.representation.volume.registry.get(name);
 
-        const themeDataCtx = { volume };
-        const colorParams = ctx.representation.volume.themes.colorThemeRegistry.get(type.defaultColorTheme.name).getParams(themeDataCtx);
-        const sizeParams = ctx.representation.volume.themes.sizeThemeRegistry.get(type.defaultSizeTheme.name).getParams(themeDataCtx);
+        const colorType = ctx.representation.volume.themes.colorThemeRegistry.get(colorName || type.defaultColorTheme.name);
+        const sizeType = ctx.representation.volume.themes.sizeThemeRegistry.get(sizeName || type.defaultSizeTheme.name);
         const volumeDefaultParams = PD.getDefaultValues(type.getParams(ctx.representation.volume.themes, volume));
         return ({
             type: { name, params: volumeParams ? { ...volumeDefaultParams, ...volumeParams } : volumeDefaultParams },
-            colorTheme: { name: type.defaultColorTheme.name, params: PD.getDefaultValues(colorParams) },
-            sizeTheme: { name: type.defaultSizeTheme.name, params: PD.getDefaultValues(sizeParams) }
+            colorTheme: { name: colorType.name, params: colorParams ? { ...colorType.defaultValues, ...colorParams } : colorType.defaultValues },
+            sizeTheme: { name: sizeType.name, params: sizeParams ? { ...sizeType.defaultValues, ...sizeParams } : sizeType.defaultValues }
         });
     }
 
@@ -677,7 +1000,7 @@ const VolumeRepresentation3D = PluginStateTransform.BuiltIn({
             ),
             sizeTheme: PD.Mapped<any>(
                 type.defaultSizeTheme.name,
-                themeCtx.sizeThemeRegistry.types,
+                themeCtx.sizeThemeRegistry.getApplicableTypes(dataCtx),
                 name => PD.Group<any>(themeCtx.sizeThemeRegistry.get(name).getParams(dataCtx))
             )
         });
@@ -688,11 +1011,11 @@ const VolumeRepresentation3D = PluginStateTransform.BuiltIn({
     },
     apply({ a, params }, plugin: PluginContext) {
         return Task.create('Volume Representation', async ctx => {
-            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset };
+            const propertyCtx = { runtime: ctx, assetManager: plugin.managers.asset, errorContext: plugin.errorContext };
             const provider = plugin.representation.volume.registry.get(params.type.name);
             if (provider.ensureCustomProperties) await provider.ensureCustomProperties.attach(propertyCtx, a.data);
             const repr = provider.factory({ webgl: plugin.canvas3d?.webgl, ...plugin.representation.volume.themes }, provider.getParams);
-            repr.setTheme(Theme.create(plugin.representation.volume.themes, { volume: a.data }, params));
+            repr.setTheme(Theme.create(plugin.representation.volume.themes, { volume: a.data, locationKinds: provider.locationKinds }, params));
 
             const props = params.type.params || {};
             await repr.createOrUpdate(props, a.data).runInContext(ctx);
@@ -701,13 +1024,13 @@ const VolumeRepresentation3D = PluginStateTransform.BuiltIn({
     },
     update({ a, b, oldParams, newParams }, plugin: PluginContext) {
         return Task.create('Volume Representation', async ctx => {
+            const oldProvider = plugin.representation.volume.registry.get(oldParams.type.name);
             if (newParams.type.name !== oldParams.type.name) {
-                const oldProvider = plugin.representation.volume.registry.get(oldParams.type.name);
                 oldProvider.ensureCustomProperties?.detach(a.data);
                 return StateTransformer.UpdateResult.Recreate;
             }
             const props = { ...b.data.repr.props, ...newParams.type.params };
-            b.data.repr.setTheme(Theme.create(plugin.representation.volume.themes, { volume: a.data }, newParams));
+            b.data.repr.setTheme(Theme.create(plugin.representation.volume.themes, { volume: a.data, locationKinds: oldProvider.locationKinds }, newParams));
             await b.data.repr.createOrUpdate(props, a.data).runInContext(ctx);
             b.data.sourceData = a.data;
             b.description = VolumeRepresentation3DHelpers.getDescription(props);
@@ -732,7 +1055,7 @@ const ShapeRepresentation3D = PluginStateTransform.BuiltIn({
     canAutoUpdate() {
         return true;
     },
-    apply({ a, params }, plugin: PluginContext) {
+    apply({ a, params }) {
         return Task.create('Shape Representation', async ctx => {
             const props = { ...PD.getDefaultValues(a.data.params), ...params };
             const repr = ShapeRepresentation(a.data.getShape, a.data.geometryUtils);
@@ -740,7 +1063,7 @@ const ShapeRepresentation3D = PluginStateTransform.BuiltIn({
             return new SO.Shape.Representation3D({ repr, sourceData: a.data }, { label: a.data.label });
         });
     },
-    update({ a, b, oldParams, newParams }, plugin: PluginContext) {
+    update({ a, b, newParams }) {
         return Task.create('Shape Representation', async ctx => {
             const props = { ...b.data.repr.props, ...newParams };
             await b.data.repr.createOrUpdate(props, a.data.data).runInContext(ctx);
@@ -941,6 +1264,11 @@ const StructureSelectionsLabel3D = PluginStateTransform.BuiltIn({
             const data = getLabelDataFromStructureSelections(a.data);
             const repr = LabelRepresentation({ webgl: plugin.canvas3d?.webgl, ...plugin.representation.structure.themes }, () => LabelParams);
             await repr.createOrUpdate(params, data).runInContext(ctx);
+
+            // Support interactivity when needed
+            const pickable = !!(params.snapshotKey?.trim() || params.tooltip?.trim());
+            repr.setState({ pickable, markerActions: pickable ? MarkerActions.Highlighting : MarkerAction.None });
+
             return new SO.Shape.Representation3D({ repr, sourceData: data }, { label: `Label` });
         });
     },
@@ -950,6 +1278,11 @@ const StructureSelectionsLabel3D = PluginStateTransform.BuiltIn({
             const data = getLabelDataFromStructureSelections(a.data);
             await b.data.repr.createOrUpdate(props, data).runInContext(ctx);
             b.data.sourceData = data;
+
+            // Update interactivity
+            const pickable = !!(newParams.snapshotKey?.trim() || newParams.tooltip?.trim());
+            b.data.repr.setState({ pickable, markerActions: pickable ? MarkerActions.Highlighting : MarkerAction.None });
+
             return StateTransformer.UpdateResult.Updated;
         });
     },
@@ -981,6 +1314,39 @@ const StructureSelectionsOrientation3D = PluginStateTransform.BuiltIn({
         return Task.create('Structure Orientation', async ctx => {
             const props = { ...b.data.repr.props, ...newParams };
             const data = getOrientationDataFromStructureSelections(a.data);
+            await b.data.repr.createOrUpdate(props, data).runInContext(ctx);
+            b.data.sourceData = data;
+            return StateTransformer.UpdateResult.Updated;
+        });
+    },
+});
+
+export { StructureSelectionsPlane3D };
+type StructureSelectionsPlane3D = typeof StructureSelectionsPlane3D
+const StructureSelectionsPlane3D = PluginStateTransform.BuiltIn({
+    name: 'structure-selections-plane-3d',
+    display: '3D Plane',
+    from: SO.Molecule.Structure.Selections,
+    to: SO.Shape.Representation3D,
+    params: () => ({
+        ...PlaneParams,
+    })
+})({
+    canAutoUpdate({ oldParams, newParams }) {
+        return true;
+    },
+    apply({ a, params }, plugin: PluginContext) {
+        return Task.create('Structure Plane', async ctx => {
+            const data = getPlaneDataFromStructureSelections(a.data);
+            const repr = PlaneRepresentation({ webgl: plugin.canvas3d?.webgl, ...plugin.representation.structure.themes }, () => PlaneParams);
+            await repr.createOrUpdate(params, data).runInContext(ctx);
+            return new SO.Shape.Representation3D({ repr, sourceData: data }, { label: `Plane` });
+        });
+    },
+    update({ a, b, oldParams, newParams }, plugin: PluginContext) {
+        return Task.create('Structure Plane', async ctx => {
+            const props = { ...b.data.repr.props, ...newParams };
+            const data = getPlaneDataFromStructureSelections(a.data);
             await b.data.repr.createOrUpdate(props, data).runInContext(ctx);
             b.data.sourceData = data;
             return StateTransformer.UpdateResult.Updated;

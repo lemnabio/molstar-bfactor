@@ -1,8 +1,10 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Adam Midlik <midlik@gmail.com>
+ * @author Ludovic Autin <ludovic.autin@gmail.com>
  */
 
 import { parseDcd } from '../../mol-io/reader/dcd/parser';
@@ -12,10 +14,10 @@ import { Mat4, Vec3 } from '../../mol-math/linear-algebra';
 import { shapeFromPly } from '../../mol-model-formats/shape/ply';
 import { coordinatesFromDcd } from '../../mol-model-formats/structure/dcd';
 import { trajectoryFromGRO } from '../../mol-model-formats/structure/gro';
-import { trajectoryFromMmCIF } from '../../mol-model-formats/structure/mmcif';
+import { trajectoryFromCCD, trajectoryFromMmCIF } from '../../mol-model-formats/structure/mmcif';
 import { trajectoryFromPDB } from '../../mol-model-formats/structure/pdb';
 import { topologyFromPsf } from '../../mol-model-formats/structure/psf';
-import { Coordinates, Model, Queries, QueryContext, Structure, StructureElement, StructureQuery, StructureSelection as Sel, Topology, ArrayTrajectory, Trajectory } from '../../mol-model/structure';
+import { Coordinates, Model, Queries, QueryContext, Structure, StructureElement, StructureQuery, StructureSelection as Sel, Topology, ArrayTrajectory, Trajectory, Frame } from '../../mol-model/structure';
 import { PluginContext } from '../../mol-plugin/context';
 import { MolScriptBuilder } from '../../mol-script/language/builder';
 import { Expression } from '../../mol-script/language/expression';
@@ -39,29 +41,52 @@ import { parseXtc } from '../../mol-io/reader/xtc/parser';
 import { coordinatesFromXtc } from '../../mol-model-formats/structure/xtc';
 import { parseXyz } from '../../mol-io/reader/xyz/parser';
 import { trajectoryFromXyz } from '../../mol-model-formats/structure/xyz';
+import { UnitStyles } from '../../mol-io/reader/lammps/schema';
+import { parseLammpsData } from '../../mol-io/reader/lammps/data/parser';
+import { trajectoryFromLammpsData } from '../../mol-model-formats/structure/lammps-data';
+import { parseLammpsTrajectory } from '../../mol-io/reader/lammps/traj/parser';
+import { coordinatesFromLammpsTrajectory, trajectoryFromLammpsTrajectory } from '../../mol-model-formats/structure/lammps-trajectory';
 import { parseSdf } from '../../mol-io/reader/sdf/parser';
 import { trajectoryFromSdf } from '../../mol-model-formats/structure/sdf';
+import { assertUnreachable } from '../../mol-util/type-helpers';
+import { parseTrr } from '../../mol-io/reader/trr/parser';
+import { coordinatesFromTrr } from '../../mol-model-formats/structure/trr';
+import { parseNctraj } from '../../mol-io/reader/nctraj/parser';
+import { coordinatesFromNctraj } from '../../mol-model-formats/structure/nctraj';
+import { topologyFromPrmtop } from '../../mol-model-formats/structure/prmtop';
+import { topologyFromTop } from '../../mol-model-formats/structure/top';
+import { getTransformFromParams, TransformParam, transformParamsNeedCentroid } from './helpers';
 
 export { CoordinatesFromDcd };
 export { CoordinatesFromXtc };
+export { CoordinatesFromTrr };
+export { CoordinatesFromNctraj };
+export { CoordinatesFromLammpstraj };
 export { TopologyFromPsf };
+export { TopologyFromPrmtop };
+export { TopologyFromTop };
 export { TrajectoryFromModelAndCoordinates };
 export { TrajectoryFromBlob };
 export { TrajectoryFromMmCif };
 export { TrajectoryFromPDB };
 export { TrajectoryFromGRO };
 export { TrajectoryFromXYZ };
+export { TrajectoryFromLammpsData };
+export { TrajectoryFromLammpsTrajData };
 export { TrajectoryFromMOL };
 export { TrajectoryFromSDF };
 export { TrajectoryFromMOL2 };
 export { TrajectoryFromCube };
 export { TrajectoryFromCifCore };
 export { ModelFromTrajectory };
+export { ModelWithCoordinates };
 export { StructureFromTrajectory };
 export { StructureFromModel };
 export { TransformStructureConformation };
+export { StructureInstances };
 export { StructureSelectionFromExpression };
 export { MultiStructureSelectionFromExpression };
+export { MultiStructureSelectionFromBundle };
 export { StructureSelectionFromScript };
 export { StructureSelectionFromBundle };
 export { StructureComplexElement };
@@ -87,7 +112,7 @@ const CoordinatesFromDcd = PluginStateTransform.BuiltIn({
     }
 });
 
-type CoordinatesFromXtc = typeof CoordinatesFromDcd
+type CoordinatesFromXtc = typeof CoordinatesFromXtc
 const CoordinatesFromXtc = PluginStateTransform.BuiltIn({
     name: 'coordinates-from-xtc',
     display: { name: 'Parse XTC', description: 'Parse XTC binary data.' },
@@ -104,10 +129,61 @@ const CoordinatesFromXtc = PluginStateTransform.BuiltIn({
     }
 });
 
+type CoordinatesFromTrr = typeof CoordinatesFromTrr
+const CoordinatesFromTrr = PluginStateTransform.BuiltIn({
+    name: 'coordinates-from-trr',
+    display: { name: 'Parse TRR', description: 'Parse TRR binary data.' },
+    from: [SO.Data.Binary],
+    to: SO.Molecule.Coordinates
+})({
+    apply({ a }) {
+        return Task.create('Parse TRR', async ctx => {
+            const parsed = await parseTrr(a.data).runInContext(ctx);
+            if (parsed.isError) throw new Error(parsed.message);
+            const coordinates = await coordinatesFromTrr(parsed.result).runInContext(ctx);
+            return new SO.Molecule.Coordinates(coordinates, { label: a.label, description: 'Coordinates' });
+        });
+    }
+});
+
+type CoordinatesFromNctraj = typeof CoordinatesFromNctraj
+const CoordinatesFromNctraj = PluginStateTransform.BuiltIn({
+    name: 'coordinates-from-nctraj',
+    display: { name: 'Parse NCTRAJ', description: 'Parse NCTRAJ binary data.' },
+    from: [SO.Data.Binary],
+    to: SO.Molecule.Coordinates
+})({
+    apply({ a }) {
+        return Task.create('Parse NCTRAJ', async ctx => {
+            const parsed = await parseNctraj(a.data).runInContext(ctx);
+            if (parsed.isError) throw new Error(parsed.message);
+            const coordinates = await coordinatesFromNctraj(parsed.result).runInContext(ctx);
+            return new SO.Molecule.Coordinates(coordinates, { label: a.label, description: 'Coordinates' });
+        });
+    }
+});
+
+type CoordinatesFromLammpstraj = typeof CoordinatesFromLammpstraj
+const CoordinatesFromLammpstraj = PluginStateTransform.BuiltIn({
+    name: 'coordinates-from-lammpstraj',
+    display: { name: 'Parse LAMMPSTRAJ', description: 'Parse LAMMPSTRAJ data.' },
+    from: [SO.Data.String],
+    to: SO.Molecule.Coordinates
+})({
+    apply({ a }) {
+        return Task.create('Parse LAMMPSTRAJ', async ctx => {
+            const parsed = await parseLammpsTrajectory(a.data).runInContext(ctx);
+            if (parsed.isError) throw new Error(parsed.message);
+            const coordinates = await coordinatesFromLammpsTrajectory(parsed.result).runInContext(ctx);
+            return new SO.Molecule.Coordinates(coordinates, { label: a.label, description: 'Coordinates' });
+        });
+    }
+});
+
 type TopologyFromPsf = typeof TopologyFromPsf
 const TopologyFromPsf = PluginStateTransform.BuiltIn({
     name: 'topology-from-psf',
-    display: { name: 'PSF Topology', description: 'Parse PSF string data.' },
+    display: { name: 'PSF Topology', description: 'Create topology from PSF.' },
     from: [SO.Format.Psf],
     to: SO.Molecule.Topology
 })({
@@ -119,7 +195,37 @@ const TopologyFromPsf = PluginStateTransform.BuiltIn({
     }
 });
 
-async function getTrajectory(ctx: RuntimeContext, obj: StateObject, coordinates: Coordinates) {
+type TopologyFromPrmtop = typeof TopologyFromPrmtop
+const TopologyFromPrmtop = PluginStateTransform.BuiltIn({
+    name: 'topology-from-prmtop',
+    display: { name: 'PRMTOP Topology', description: 'Create topology from PRMTOP.' },
+    from: [SO.Format.Prmtop],
+    to: SO.Molecule.Topology
+})({
+    apply({ a }) {
+        return Task.create('Create Topology', async ctx => {
+            const topology = await topologyFromPrmtop(a.data).runInContext(ctx);
+            return new SO.Molecule.Topology(topology, { label: topology.label || a.label, description: 'Topology' });
+        });
+    }
+});
+
+type TopologyFromTop = typeof TopologyFromTop
+const TopologyFromTop = PluginStateTransform.BuiltIn({
+    name: 'topology-from-top',
+    display: { name: 'TOP Topology', description: 'Create topology from TOP.' },
+    from: [SO.Format.Top],
+    to: SO.Molecule.Topology
+})({
+    apply({ a }) {
+        return Task.create('Create Topology', async ctx => {
+            const topology = await topologyFromTop(a.data).runInContext(ctx);
+            return new SO.Molecule.Topology(topology, { label: topology.label || a.label, description: 'Topology' });
+        });
+    }
+});
+
+export async function getTrajectory(ctx: RuntimeContext, obj: StateObject, coordinates: Coordinates) {
     if (obj.type === SO.Molecule.Topology.type) {
         const topology = obj.data as Topology;
         return await Model.trajectoryFromTopologyAndCoordinates(topology, coordinates).runInContext(ctx);
@@ -197,25 +303,47 @@ const TrajectoryFromMmCif = PluginStateTransform.BuiltIn({
     params(a) {
         if (!a) {
             return {
-                blockHeader: PD.Optional(PD.Text(void 0, { description: 'Header of the block to parse. If none is specifed, the 1st data block in the file is used.' }))
+                loadAllBlocks: PD.Optional(PD.Boolean(false, { description: 'If True, ignore Block Header and Block Index parameters and parse all datablocks into a single trajectory.' })),
+                blockHeader: PD.Optional(PD.Text(void 0, { description: 'Header of the block to parse. If not specifed, Block Index parameter applies.', hideIf: p => p.loadAllBlocks === true })),
+                blockIndex: PD.Optional(PD.Numeric(0, { min: 0, step: 1 }, { description: 'Zero-based index of the block to parse. Only applies when Block Header parameter is not specified.', hideIf: p => p.loadAllBlocks === true || p.blockHeader })),
             };
         }
         const { blocks } = a.data;
+        const headers = blocks.map(b => [b.header, b.header] as [string, string]);
+        headers.push(['', '[Use Block Index]']);
         return {
-            blockHeader: PD.Optional(PD.Select(blocks[0] && blocks[0].header, blocks.map(b => [b.header, b.header] as [string, string]), { description: 'Header of the block to parse' }))
+            loadAllBlocks: PD.Optional(PD.Boolean(false, { description: 'If True, ignore Block Header and Block Index parameters and parse all data blocks into a single trajectory.' })),
+            blockHeader: PD.Optional(PD.Select(blocks[0] && blocks[0].header, headers, { description: 'Header of the block to parse. If not specifed, Block Index parameter applies.', hideIf: p => p.loadAllBlocks === true })),
+            blockIndex: PD.Optional(PD.Numeric(0, { min: 0, step: 1, max: blocks.length - 1 }, { description: 'Zero-based index of the block to parse. Only applies when Block Header parameter is not specified.', hideIf: p => p.loadAllBlocks === true || p.blockHeader })),
         };
     }
 })({
     isApplicable: a => a.data.blocks.length > 0,
     apply({ a, params }) {
         return Task.create('Parse mmCIF', async ctx => {
-            const header = params.blockHeader || a.data.blocks[0].header;
-            const block = a.data.blocks.find(b => b.header === header);
-            if (!block) throw new Error(`Data block '${[header]}' not found.`);
-            const models = await trajectoryFromMmCIF(block).runInContext(ctx);
-            if (models.frameCount === 0) throw new Error('No models found.');
-            const props = trajectoryProps(models);
-            return new SO.Molecule.Trajectory(models, props);
+            let trajectory: Trajectory;
+            if (params.loadAllBlocks) {
+                const models: Model[] = [];
+                for (const block of a.data.blocks) {
+                    if (ctx.shouldUpdate) {
+                        await ctx.update(`Parsing ${block.header}...`);
+                    }
+                    const t = await trajectoryFromMmCIF(block).runInContext(ctx);
+                    for (let i = 0; i < t.frameCount; i++) {
+                        models.push(await Task.resolveInContext(t.getFrameAtIndex(i), ctx));
+                    }
+                }
+                trajectory = new ArrayTrajectory(models);
+            } else {
+                const header = params.blockHeader || a.data.blocks[params.blockIndex ?? 0].header;
+                const block = a.data.blocks.find(b => b.header === header);
+                if (!block) throw new Error(`Data block '${[header]}' not found.`);
+                const isCcd = block.categoryNames.includes('chem_comp_atom') && !block.categoryNames.includes('atom_site') && !block.categoryNames.includes('ihm_sphere_obj_site') && !block.categoryNames.includes('ihm_gaussian_obj_site');
+                trajectory = isCcd ? await trajectoryFromCCD(block).runInContext(ctx) : await trajectoryFromMmCIF(block, a.data).runInContext(ctx);
+            }
+            if (trajectory.frameCount === 0) throw new Error('No models found.');
+            const props = trajectoryProps(trajectory);
+            return new SO.Molecule.Trajectory(trajectory, props);
         });
     }
 });
@@ -227,7 +355,7 @@ const TrajectoryFromPDB = PluginStateTransform.BuiltIn({
     from: [SO.Data.String],
     to: SO.Molecule.Trajectory,
     params: {
-        isPdbqt: PD.Boolean(false)
+        isPdbqt: PD.Boolean(false),
     }
 })({
     apply({ a, params }) {
@@ -276,6 +404,49 @@ const TrajectoryFromXYZ = PluginStateTransform.BuiltIn({
         });
     }
 });
+
+type TrajectoryFromLammpsData = typeof TrajectoryFromLammpsData
+const TrajectoryFromLammpsData = PluginStateTransform.BuiltIn({
+    name: 'trajectory-from-lammps-data',
+    display: { name: 'Parse Lammps Data', description: 'Parse Lammps Data from string and create trajectory.' },
+    from: [SO.Data.String],
+    to: SO.Molecule.Trajectory,
+    params: {
+        unitsStyle: PD.Select('real', PD.arrayToOptions(UnitStyles)),
+    }
+})({
+    apply({ a, params }) {
+        return Task.create('Parse Lammps Data', async ctx => {
+            const parsed = await parseLammpsData(a.data).runInContext(ctx);
+            if (parsed.isError) throw new Error(parsed.message);
+            const models = await trajectoryFromLammpsData(parsed.result, params.unitsStyle).runInContext(ctx);
+            const props = trajectoryProps(models);
+            return new SO.Molecule.Trajectory(models, props);
+        });
+    }
+});
+
+type TrajectoryFromLammpsTrajData = typeof TrajectoryFromLammpsTrajData
+const TrajectoryFromLammpsTrajData = PluginStateTransform.BuiltIn({
+    name: 'trajectory-from-lammps-traj-data',
+    display: { name: 'Parse Lammps traj Data', description: 'Parse Lammps Traj Data string and create trajectory.' },
+    from: [SO.Data.String],
+    to: SO.Molecule.Trajectory,
+    params: {
+        unitsStyle: PD.Select('real', PD.arrayToOptions(UnitStyles)),
+    }
+})({
+    apply({ a, params }) {
+        return Task.create('Parse Lammps Data', async ctx => {
+            const parsed = await parseLammpsTrajectory(a.data).runInContext(ctx);
+            if (parsed.isError) throw new Error(parsed.message);
+            const models = await trajectoryFromLammpsTrajectory(parsed.result, params.unitsStyle).runInContext(ctx);
+            const props = trajectoryProps(models);
+            return new SO.Molecule.Trajectory(models, props);
+        });
+    }
+});
+
 
 type TrajectoryFromMOL = typeof TrajectoryFromMOL
 const TrajectoryFromMOL = PluginStateTransform.BuiltIn({
@@ -407,7 +578,7 @@ const ModelFromTrajectory = PluginStateTransform.BuiltIn({
     isApplicable: a => a.data.frameCount > 0,
     apply({ a, params }) {
         return Task.create('Model from Trajectory', async ctx => {
-            let modelIndex = params.modelIndex % a.data.frameCount;
+            let modelIndex = Math.round(params.modelIndex) % a.data.frameCount;
             if (modelIndex < 0) modelIndex += a.data.frameCount;
             const model = await Task.resolveInContext(a.data.getFrameAtIndex(modelIndex), ctx);
             const label = `Model ${modelIndex + 1}`;
@@ -473,8 +644,6 @@ const StructureFromModel = PluginStateTransform.BuiltIn({
     }
 });
 
-const _translation = Vec3(), _m = Mat4(), _n = Mat4();
-
 type TransformStructureConformation = typeof TransformStructureConformation
 const TransformStructureConformation = PluginStateTransform.BuiltIn({
     name: 'transform-structure-conformation',
@@ -483,40 +652,15 @@ const TransformStructureConformation = PluginStateTransform.BuiltIn({
     from: SO.Molecule.Structure,
     to: SO.Molecule.Structure,
     params: {
-        transform: PD.MappedStatic('components', {
-            components: PD.Group({
-                axis: PD.Vec3(Vec3.create(1, 0, 0)),
-                angle: PD.Numeric(0, { min: -180, max: 180, step: 0.1 }),
-                translation: PD.Vec3(Vec3.create(0, 0, 0)),
-            }, { isFlat: true }),
-            matrix: PD.Group({
-                data: PD.Mat4(Mat4.identity()),
-                transpose: PD.Boolean(false)
-            }, { isFlat: true })
-        }, { label: 'Kind' })
+        transform: TransformParam
     }
 })({
     canAutoUpdate({ newParams }) {
         return newParams.transform.name !== 'matrix';
     },
     apply({ a, params }) {
-        // TODO: optimze
-        // TODO: think of ways how to fast-track changes to this for animations
-
-        const transform = Mat4();
-
-        if (params.transform.name === 'components') {
-            const { axis, angle, translation } = params.transform.params;
-            const center = a.data.boundary.sphere.center;
-            Mat4.fromTranslation(_m, Vec3.negate(_translation, center));
-            Mat4.fromTranslation(_n, Vec3.add(_translation, center, translation));
-            const rot = Mat4.fromRotation(Mat4(), Math.PI / 180 * angle, Vec3.normalize(Vec3(), axis));
-            Mat4.mul3(transform, _n, rot, _m);
-        } else if (params.transform.name === 'matrix') {
-            Mat4.copy(transform, params.transform.params.data);
-            if (params.transform.params.transpose) Mat4.transpose(transform, transform);
-        }
-
+        const center = transformParamsNeedCentroid(params.transform) ? a.data.boundary.sphere.center : Vec3.unit;
+        const transform = getTransformFromParams(params.transform, center);
         const s = Structure.transform(a.data, transform);
         return new SO.Molecule.Structure(s, { label: a.label, description: `${a.description} [Transformed]` });
     },
@@ -536,6 +680,71 @@ const TransformStructureConformation = PluginStateTransform.BuiltIn({
     //     const translation = Mat4.getTranslation(Vec3(), m);
     //     return { axis, angle, translation };
     // }
+});
+
+
+type StructureInstances = typeof StructureInstances
+const StructureInstances = PluginStateTransform.BuiltIn({
+    name: 'structure-instances',
+    display: { name: 'Structure Instances' },
+    isDecorator: true,
+    from: SO.Molecule.Structure,
+    to: SO.Molecule.Structure,
+    params: {
+        transforms: PD.ObjectList({ transform: TransformParam }, () => 'Transform')
+    },
+})({
+    canAutoUpdate() {
+        return true;
+    },
+    apply({ a, params }) {
+        const center = params.transforms.some(t => transformParamsNeedCentroid(t.transform)) ? a.data.boundary.sphere.center : Vec3.unit;
+        const instances = params.transforms.map(t => getTransformFromParams(t.transform, center));
+        if (!instances.length) {
+            return a;
+        }
+
+        const s = Structure.instances(a.data, instances);
+        return new SO.Molecule.Structure(s, { label: a.label, description: `${a.description} [Instanced]` });
+    },
+    dispose({ b }) {
+        b?.data.customPropertyDescriptors.dispose();
+    }
+});
+
+type ModelWithCoordinates = typeof ModelWithCoordinates
+const ModelWithCoordinates = PluginStateTransform.BuiltIn({
+    name: 'model-with-coordinates',
+    display: { name: 'Model With Coordinates', description: 'Updates the current model with provided coordinate frame' },
+    from: SO.Molecule.Model,
+    to: SO.Molecule.Model,
+    params: {
+        frameIndex: PD.Optional(PD.Numeric(0, undefined, { isHidden: true })),
+        frameCount: PD.Optional(PD.Numeric(1, undefined, { isHidden: true })),
+        atomicCoordinateFrame: PD.Optional(PD.Value<Frame | undefined>(undefined, { isHidden: true })),
+    },
+    isDecorator: true,
+})({
+    apply({ a, params }) {
+        if (!params.atomicCoordinateFrame) {
+            return a;
+        }
+        const model: Model = { ...a.data, atomicConformation: Model.getAtomicConformationFromFrame(a.data, params.atomicCoordinateFrame) };
+        Model.TrajectoryInfo.set(model, { index: params.frameIndex ?? 0, size: params.frameCount ?? 1 });
+        return new SO.Molecule.Model(model, { label: a.label, description: a.description });
+    },
+    update: ({ a, b, oldParams, newParams }) => {
+        if (oldParams.atomicCoordinateFrame === newParams.atomicCoordinateFrame) {
+            return StateTransformer.UpdateResult.Unchanged;
+        }
+        if (!newParams.atomicCoordinateFrame) {
+            b.data = a.data;
+        } else {
+            b.data = { ...b.data, atomicConformation: Model.getAtomicConformationFromFrame(b.data, newParams.atomicCoordinateFrame) };
+        }
+        Model.TrajectoryInfo.set(b.data, { index: newParams.frameIndex ?? 0, size: newParams.frameCount ?? 1 });
+        return StateTransformer.UpdateResult.Updated;
+    },
 });
 
 type StructureSelectionFromExpression = typeof StructureSelectionFromExpression
@@ -605,7 +814,7 @@ const MultiStructureSelectionFromExpression = PluginStateTransform.BuiltIn({
             const { selection, entry } = StructureQueryHelper.createAndRun(dependencies![sel.ref].data as Structure, sel.expression);
             entries.set(sel.key, entry);
             const loci = Sel.toLociWithSourceUnits(selection);
-            selections.push({ key: sel.key, loci, groupId: sel.groupId });
+            selections.push({ key: sel.key, structureRef: sel.ref, loci, groupId: sel.groupId });
             totalSize += StructureElement.Loci.size(loci);
         }
 
@@ -645,7 +854,8 @@ const MultiStructureSelectionFromExpression = PluginStateTransform.BuiltIn({
                     totalSize += StructureElement.Loci.size(loci.loci);
 
                     continue;
-                } if (entry.expression !== sel.expression) {
+                }
+                if (entry.expression !== sel.expression) {
                     recreate = true;
                 } else {
                     // TODO: properly support "transitive" queries. For that Structure.areUnitAndIndicesEqual needs to be fixed;
@@ -657,7 +867,7 @@ const MultiStructureSelectionFromExpression = PluginStateTransform.BuiltIn({
                             entry.currentStructure = structure;
                             entries.set(sel.key, entry);
                             const loci = StructureElement.Loci.remap(Sel.toLociWithSourceUnits(selection), structure);
-                            selections.push({ key: sel.key, loci, groupId: sel.groupId });
+                            selections.push({ key: sel.key, structureRef: sel.ref, loci, groupId: sel.groupId });
                             totalSize += StructureElement.Loci.size(loci);
                             changed = true;
                         } else {
@@ -672,7 +882,7 @@ const MultiStructureSelectionFromExpression = PluginStateTransform.BuiltIn({
                         const selection = StructureQueryHelper.updateStructure(entry, structure);
                         entries.set(sel.key, entry);
                         const loci = Sel.toLociWithSourceUnits(selection);
-                        selections.push({ key: sel.key, loci, groupId: sel.groupId });
+                        selections.push({ key: sel.key, structureRef: sel.ref, loci, groupId: sel.groupId });
                         totalSize += StructureElement.Loci.size(loci);
                     }
                 }
@@ -687,8 +897,108 @@ const MultiStructureSelectionFromExpression = PluginStateTransform.BuiltIn({
                 const { selection, entry } = StructureQueryHelper.createAndRun(structure, sel.expression);
                 entries.set(sel.key, entry);
                 const loci = Sel.toLociWithSourceUnits(selection);
-                selections.push({ key: sel.key, loci });
+                selections.push({ key: sel.key, structureRef: sel.ref, loci, groupId: sel.groupId });
                 totalSize += StructureElement.Loci.size(loci);
+            }
+        }
+
+        if (!changed) return StateTransformer.UpdateResult.Unchanged;
+
+        (cache as object as any).entries = entries;
+        b.data = selections;
+        b.label = `${newParams.label || 'Multi-selection'}`;
+        b.description = `${selections.length} source(s), ${totalSize} element(s) total`;
+
+        return StateTransformer.UpdateResult.Updated;
+    }
+});
+
+type MultiStructureSelectionFromBundle = typeof MultiStructureSelectionFromBundle
+const MultiStructureSelectionFromBundle = PluginStateTransform.BuiltIn({
+    name: 'structure-multi-selection-from-bundle',
+    display: { name: 'Multi-structure Measurement Selection', description: 'Create selection object from multiple structures.' },
+    from: SO.Root,
+    to: SO.Molecule.Structure.Selections,
+    params: () => ({
+        selections: PD.ObjectList({
+            key: PD.Text(void 0, { description: 'A unique key.' }),
+            ref: PD.Text(),
+            groupId: PD.Optional(PD.Text()),
+            bundle: PD.Value<StructureElement.Bundle>(StructureElement.Bundle.Empty),
+        }, e => e.ref, { isHidden: true }),
+        isTransitive: PD.Optional(PD.Boolean(false, { isHidden: true, description: 'Remap the selections from the original structure if structurally equivalent.' })),
+        label: PD.Optional(PD.Text('', { isHidden: true }))
+    })
+})({
+    apply({ params, cache, dependencies }) {
+        const entries = new Map<string, { source: Structure }>();
+
+        const selections: SO.Molecule.Structure.SelectionEntry[] = [];
+        let totalSize = 0;
+
+        for (const sel of params.selections) {
+            const source = dependencies![sel.ref].data as Structure;
+            const loci = StructureElement.Bundle.toLoci(sel.bundle, source);
+            selections.push({ key: sel.key, structureRef: sel.ref, loci, groupId: sel.groupId });
+            totalSize += StructureElement.Loci.size(loci);
+            entries.set(sel.key, { source });
+        }
+
+        (cache as object as any).entries = entries;
+
+        const props = { label: `${params.label || 'Multi-selection'}`, description: `${params.selections.length} source(s), ${totalSize} element(s) total` };
+        return new SO.Molecule.Structure.Selections(selections, props);
+    },
+    update: ({ b, oldParams, newParams, cache, dependencies }) => {
+        if (!!oldParams.isTransitive !== !!newParams.isTransitive) return StateTransformer.UpdateResult.Recreate;
+
+        const cacheEntries = (cache as any).entries as Map<string, { source: Structure }>;
+        const entries = new Map<string, { source: Structure }>();
+
+        const prevBundles = new Map<string, StructureElement.Bundle>();
+        for (const sel of oldParams.selections) {
+            prevBundles.set(sel.key, sel.bundle);
+        }
+
+        const current = new Map<string, SO.Molecule.Structure.SelectionEntry>();
+        for (const e of b.data) current.set(e.key, e);
+
+        let changed = false;
+        let totalSize = 0;
+
+        const selections: SO.Molecule.Structure.SelectionEntry[] = [];
+        for (const sel of newParams.selections) {
+            let recreate = false;
+
+            if (cacheEntries.has(sel.key)) {
+                const source = dependencies![sel.ref].data as Structure;
+                const entry = cacheEntries.get(sel.key)!;
+                const prev = prevBundles.get(sel.key);
+                if (prev && source === entry.source && sel.bundle.hash === entry.source.hashCode && StructureElement.Bundle.areEqual(sel.bundle, prev)) {
+                    const loci = current.get(sel.key)!;
+                    if (loci.groupId !== sel.groupId) {
+                        loci.groupId = sel.groupId;
+                        changed = true;
+                    }
+                    entries.set(sel.key, entry);
+                    selections.push(loci);
+                    totalSize += StructureElement.Loci.size(loci.loci);
+                    continue;
+                }
+                recreate = true;
+            } else {
+                recreate = true;
+            }
+
+            if (recreate) {
+                changed = true;
+
+                // create new selection
+                const source = dependencies![sel.ref].data as Structure;
+                const loci = StructureElement.Bundle.toLoci(sel.bundle, source);
+                selections.push({ key: sel.key, structureRef: sel.ref, loci, groupId: sel.groupId });
+                totalSize += StructureElement.Loci.size(loci);
+                entries.set(sel.key, { source });
             }
         }
 
@@ -845,7 +1155,7 @@ const StructureComplexElement = PluginStateTransform.BuiltIn({
             case 'atomic-het': query = Queries.internal.atomicHet(); label = 'HET Groups/Ligands'; break;
             case 'spheres': query = Queries.internal.spheres(); label = 'Coarse Spheres'; break;
 
-            default: throw new Error(`${params.type} is a not valid complex element.`);
+            default: assertUnreachable(params.type);
         }
 
         const result = query(new QueryContext(a.data));
@@ -914,10 +1224,10 @@ const CustomModelProperties = PluginStateTransform.BuiltIn({
     }
 });
 async function attachModelProps(model: Model, ctx: PluginContext, taskCtx: RuntimeContext, params: ReturnType<CustomModelProperties['createDefaultParams']>) {
-    const propertyCtx = { runtime: taskCtx, assetManager: ctx.managers.asset };
+    const propertyCtx = { runtime: taskCtx, assetManager: ctx.managers.asset, errorContext: ctx.errorContext };
     const { autoAttach, properties } = params;
     for (const name of Object.keys(properties)) {
-        const property = ctx.customModelProperties.get(name);
+        const property = ctx.customModelProperties.get(name)!;
         const props = properties[name];
         if (autoAttach.includes(name) || property.isHidden) {
             try {
@@ -969,10 +1279,10 @@ const CustomStructureProperties = PluginStateTransform.BuiltIn({
     }
 });
 async function attachStructureProps(structure: Structure, ctx: PluginContext, taskCtx: RuntimeContext, params: ReturnType<CustomStructureProperties['createDefaultParams']>) {
-    const propertyCtx = { runtime: taskCtx, assetManager: ctx.managers.asset };
+    const propertyCtx = { runtime: taskCtx, assetManager: ctx.managers.asset, errorContext: ctx.errorContext };
     const { autoAttach, properties } = params;
     for (const name of Object.keys(properties)) {
-        const property = ctx.customStructureProperties.get(name);
+        const property = ctx.customStructureProperties.get(name)!;
         const props = properties[name];
         if (autoAttach.includes(name) || property.isHidden) {
             try {
@@ -993,13 +1303,16 @@ const ShapeFromPly = PluginStateTransform.BuiltIn({
     from: SO.Format.Ply,
     to: SO.Shape.Provider,
     params(a) {
-        return { };
+        return {
+            transforms: PD.Optional(PD.Value<Mat4[]>([], { isHidden: true })),
+            label: PD.Optional(PD.Text('', { isHidden: true }))
+        };
     }
 })({
     apply({ a, params }) {
         return Task.create('Create shape from PLY', async ctx => {
             const shape = await shapeFromPly(a.data, params).runInContext(ctx);
-            const props = { label: 'Shape' };
+            const props = { label: params.label || 'Shape' };
             return new SO.Shape.Provider(shape, props);
         });
     }

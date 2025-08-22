@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -166,6 +166,14 @@ export interface AtomicIndex {
     findResidue(key: AtomicIndex.ResidueKey): ResidueIndex,
     findResidue(label_entity_id: string, label_asym_id: string, auth_seq_id: number, pdbx_PDB_ins_code?: string): ResidueIndex,
 
+
+    /**
+     * Index of the 1st occurence of this residue using "all-label" address.
+     * Doesn't work for "ligands" as they don't have a label seq id assigned.
+     * @returns index or -1 if not present.
+     */
+    findResidueLabel(key: AtomicIndex.ResidueLabelKey): ResidueIndex,
+
     /**
      * Index of the 1st occurence of this residue.
      * @param key.pdbx_PDB_ins_code Empty string for undefined
@@ -205,6 +213,12 @@ export interface AtomicIndex {
      * @returns first found index or -1 if none of the given atoms are present.
      */
     findAtomsOnResidue(residueIndex: ResidueIndex, label_atom_ids: Set<string>): ElementIndex
+
+    /**
+     * Find element index of an atom on a given residue.
+     * @returns index or -1 if the atom is not present.
+     */
+    findElementOnResidue(residueIndex: ResidueIndex, type_symbol: ElementSymbol): ElementIndex
 
     // TODO: add indices that support comp_id?
 }
@@ -248,5 +262,17 @@ export namespace AtomicHierarchy {
 
     export function chainResidueCount(segs: AtomicSegments, cI: ChainIndex) {
         return chainEndResidueIndexExcl(segs, cI) - chainStartResidueIndex(segs, cI);
+    }
+
+    export function residueFirstAtomIndex(hierarchy: AtomicHierarchy, rI: ResidueIndex) {
+        return hierarchy.residueAtomSegments.offsets[rI];
+    }
+
+    export function atomChainIndex(hierarchy: AtomicHierarchy, eI: ElementIndex) {
+        return hierarchy.chainAtomSegments.index[eI];
+    }
+
+    export function residueChainIndex(hierarchy: AtomicHierarchy, rI: ResidueIndex) {
+        return hierarchy.chainAtomSegments.index[hierarchy.residueAtomSegments.offsets[rI]];
     }
 }

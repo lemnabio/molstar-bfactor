@@ -1,28 +1,28 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
-import * as React from 'react';
-import * as ReactDOM from 'react-dom';
+
+import { createElement } from 'react';
 import { Plugin } from './plugin';
 import { PluginUIContext } from './context';
 import { DefaultPluginUISpec, PluginUISpec } from './spec';
 
-export function createPlugin(target: HTMLElement, spec?: PluginUISpec): PluginUIContext {
+export async function createPluginUI(options: { target: HTMLElement, render: (component: any, container: Element) => any, spec?: PluginUISpec, onBeforeUIRender?: (ctx: PluginUIContext) => (Promise<void> | void) }) {
+    const { spec, target, onBeforeUIRender, render } = options;
     const ctx = new PluginUIContext(spec || DefaultPluginUISpec());
-    ctx.init();
-    ReactDOM.render(React.createElement(Plugin, { plugin: ctx }), target);
-    return ctx;
-}
-
-/** Returns the instance of the plugin after all behaviors have been initialized */
-export async function createPluginAsync(target: HTMLElement, spec?: PluginUISpec) {
-    const ctx = new PluginUIContext(spec || DefaultPluginUISpec());
-    const init = ctx.init();
-    ReactDOM.render(React.createElement(Plugin, { plugin: ctx }), target);
-    await init;
+    await ctx.init();
+    if (onBeforeUIRender) {
+        await onBeforeUIRender(ctx);
+    }
+    render(createElement(Plugin, { plugin: ctx }), target);
+    try {
+        await ctx.canvas3dInitialized;
+    } catch {
+        // Error reported in UI/console elsewhere.
+    }
     return ctx;
 }

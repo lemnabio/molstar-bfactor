@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -10,6 +10,7 @@ import { VisualQuality } from '../mol-geo/geometry/base';
 import { Box3D, SpacegroupCell } from '../mol-math/geometry';
 import { ModelSymmetry } from '../mol-model-formats/structure/property/symmetry';
 import { Volume } from '../mol-model/volume';
+import { Location } from '../mol-model/location';
 
 export interface VisualUpdateState {
     updateTransform: boolean
@@ -45,6 +46,8 @@ export namespace VisualUpdateState {
     }
 }
 
+export type LocationCallback = (loc: Location, isSecondary: boolean) => void
+
 //
 
 export interface QualityProps {
@@ -53,10 +56,12 @@ export interface QualityProps {
     radialSegments: number
     linearSegments: number
     resolution: number
+    imageResolution: number
     probePositions: number
     doubleSided: boolean
-    xrayShaded: boolean
+    xrayShaded: boolean | 'inverted'
     alpha: number
+    transparentBackfaces: 'off' | 'on' | 'opaque'
 }
 
 export const DefaultQualityThresholds = {
@@ -74,7 +79,7 @@ export type QualityThresholds = typeof DefaultQualityThresholds
 export function getStructureQuality(structure: Structure, tresholds: Partial<QualityThresholds> = {}): VisualQuality {
     const t = { ...DefaultQualityThresholds, ...tresholds };
     let score = structure.elementCount * t.elementCountFactor;
-    if (structure.isCoarseGrained) score *= t.coarseGrainedFactor;
+    if (structure.isCoarseGrained || structure.isCoarse) score *= t.coarseGrainedFactor;
     if (score > t.lowestElementCount) {
         return 'lowest';
     } else if (score > t.lowerElementCount) {
@@ -111,6 +116,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
     let radialSegments = defaults(props.radialSegments, 12);
     let linearSegments = defaults(props.linearSegments, 8);
     let resolution = defaults(props.resolution, 2);
+    let imageResolution = defaults(props.imageResolution, 1);
     let probePositions = defaults(props.probePositions, 12);
     let doubleSided = defaults(props.doubleSided, true);
 
@@ -132,6 +138,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
             radialSegments = 36;
             linearSegments = 18;
             resolution = 0.1;
+            imageResolution = 0.01;
             probePositions = 72;
             doubleSided = true;
             break;
@@ -140,6 +147,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
             radialSegments = 28;
             linearSegments = 14;
             resolution = 0.3;
+            imageResolution = 0.05;
             probePositions = 48;
             doubleSided = true;
             break;
@@ -148,6 +156,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
             radialSegments = 20;
             linearSegments = 10;
             resolution = 0.5;
+            imageResolution = 0.1;
             probePositions = 36;
             doubleSided = true;
             break;
@@ -156,6 +165,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
             radialSegments = 12;
             linearSegments = 8;
             resolution = 0.8;
+            imageResolution = 0.2;
             probePositions = 24;
             doubleSided = true;
             break;
@@ -164,6 +174,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
             radialSegments = 8;
             linearSegments = 3;
             resolution = 1.3;
+            imageResolution = 0.4;
             probePositions = 24;
             doubleSided = false;
             break;
@@ -172,6 +183,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
             radialSegments = 4;
             linearSegments = 2;
             resolution = 3;
+            imageResolution = 0.7;
             probePositions = 12;
             doubleSided = false;
             break;
@@ -180,6 +192,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
             radialSegments = 2;
             linearSegments = 1;
             resolution = 8;
+            imageResolution = 1;
             probePositions = 12;
             doubleSided = false;
             break;
@@ -189,10 +202,12 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
     }
 
     // max resolution based on volume (for 'auto' quality)
-    resolution = Math.max(resolution, volume / 500_000_000);
-    resolution = Math.min(resolution, 20);
+    if (volume > 0) {
+        resolution = Math.max(resolution, volume / 300_000_000);
+        resolution = Math.min(resolution, 20);
+    }
 
-    if ((props.alpha !== undefined && props.alpha < 1) || !!props.xrayShaded) {
+    if (props.transparentBackfaces === 'off' && ((props.alpha !== undefined && props.alpha < 1) || !!props.xrayShaded)) {
         doubleSided = false;
     }
 
@@ -201,6 +216,7 @@ export function getQualityProps(props: Partial<QualityProps>, data?: any) {
         radialSegments,
         linearSegments,
         resolution,
+        imageResolution,
         probePositions,
         doubleSided
     };

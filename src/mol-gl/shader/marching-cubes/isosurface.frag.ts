@@ -23,6 +23,7 @@ uniform bool uInvert;
 uniform vec3 uGridDim;
 uniform vec3 uGridTexDim;
 uniform mat4 uGridTransform;
+uniform mat3 uGridTransformAdjoint;
 
 // scale to volume data coord
 uniform vec2 uScale;
@@ -59,9 +60,14 @@ vec4 voxel(vec3 pos) {
     return texture3dFrom2dNearest(tVolumeData, pos / uGridDim, uGridDim, uGridTexDim.xy);
 }
 
-vec4 voxelPadded(vec3 pos) {
+float voxelValuePadded(vec3 pos) {
     pos = min(max(vec3(0.0), pos), uGridDim - vec3(vec2(2.0), 1.0)); // remove xy padding
-    return texture3dFrom2dNearest(tVolumeData, pos / uGridDim, uGridDim, uGridTexDim.xy);
+    vec4 v = texture3dFrom2dNearest(tVolumeData, pos / uGridDim, uGridDim, uGridTexDim.xy);
+    #ifdef dValueChannel_red
+        return v.r;
+    #else
+        return v.a;
+    #endif
 }
 
 int idot2(const in ivec2 a, const in ivec2 b) {
@@ -74,7 +80,7 @@ int idot4(const in ivec4 a, const in ivec4 b) {
 
 #if __VERSION__ == 100
     int pyramidVoxel(vec2 pos) {
-        return int(decodeFloatRGB(texture2D(tActiveVoxelsPyramid, pos / (vec2(1.0, 0.5) * uSize)).rgb));
+        return int(unpackRGBToInt(texture2D(tActiveVoxelsPyramid, pos / (vec2(1.0, 0.5) * uSize)).rgb));
     }
 #else
     int pyramidVoxel(vec2 pos) {
@@ -84,6 +90,25 @@ int idot4(const in ivec4 a, const in ivec4 b) {
 
 vec4 baseVoxel(vec2 pos) {
     return texture2D(tActiveVoxelsBase, pos / uSize);
+}
+
+vec4 getGroup(const in vec3 p) {
+    vec3 gridDim = uGridDim - vec3(1.0, 1.0, 0.0); // remove xy padding
+    // note that we swap x and z because the texture is flipped around y
+    #if defined(dAxisOrder_012)
+        float group = p.z + p.y * gridDim.z + p.x * gridDim.z * gridDim.y; // 210
+    #elif defined(dAxisOrder_021)
+        float group = p.y + p.z * gridDim.y + p.x * gridDim.y * gridDim.z; // 120
+    #elif defined(dAxisOrder_102)
+        float group = p.z + p.x * gridDim.z + p.y * gridDim.z * gridDim.x; // 201
+    #elif defined(dAxisOrder_120)
+        float group = p.x + p.z * gridDim.x + p.y * gridDim.x * gridDim.z; // 021
+    #elif defined(dAxisOrder_201)
+        float group = p.y + p.x * gridDim.y + p.z * gridDim.y * gridDim.x; // 102
+    #elif defined(dAxisOrder_210)
+        float group = p.x + p.y * gridDim.x + p.z * gridDim.x * gridDim.y; // 012
+    #endif
+    return vec4(group > 16777215.5 ? vec3(1.0) : packIntToRGB(group), 1.0);
 }
 
 void main(void) {
@@ -242,44 +267,44 @@ void main(void) {
     vec4 d0 = voxel(b0);
     vec4 d1 = voxel(b1);
 
-    float v0 = d0.a;
-    float v1 = d1.a;
+    #ifdef dValueChannel_red
+        float v0 = d0.r;
+        float v1 = d1.r;
+    #else
+        float v0 = d0.a;
+        float v1 = d1.a;
+    #endif
 
     float t = (uIsoValue - v0) / (v0 - v1);
     gl_FragData[0].xyz = (uGridTransform * vec4(b0 + t * (b0 - b1), 1.0)).xyz;
 
     // group id
-    #if __VERSION__ == 100
+    #if __VERSION__ == 100 || defined(dConstantGroup)
         // webgl1 does not support 'flat' interpolation (i.e. no interpolation)
-        // so we ensure a constant group id per triangle here
+        // ensure a constant group id per triangle as needed
         #ifdef dPackedGroup
             gl_FragData[1] = vec4(voxel(coord3d).rgb, 1.0);
         #else
-            vec3 gridDim = uGridDim - vec3(1.0, 1.0, 0.0); // remove xy padding
-            float group = coord3d.z + coord3d.y * gridDim.z + coord3d.x * gridDim.z * gridDim.y;
-            gl_FragData[1] = vec4(group > 16777215.5 ? vec3(1.0) : encodeFloatRGB(group), 1.0);
+            gl_FragData[1] = getGroup(coord3d);
         #endif
     #else
         #ifdef dPackedGroup
             gl_FragData[1] = vec4(t < 0.5 ? d0.rgb : d1.rgb, 1.0);
         #else
-            vec3 b = t < 0.5 ? b0 : b1;
-            vec3 gridDim = uGridDim - vec3(1.0, 1.0, 0.0); // remove xy padding
-            float group = b.z + b.y * gridDim.z + b.x * gridDim.z * gridDim.y;
-            gl_FragData[1] = vec4(group > 16777215.5 ? vec3(1.0) : encodeFloatRGB(group), 1.0);
+            gl_FragData[1] = getGroup(t < 0.5 ? b0 : b1);
         #endif
     #endif
 
     // normals from gradients
     vec3 n0 = -normalize(vec3(
-        voxelPadded(b0 - c1).a - voxelPadded(b0 + c1).a,
-        voxelPadded(b0 - c3).a - voxelPadded(b0 + c3).a,
-        voxelPadded(b0 - c4).a - voxelPadded(b0 + c4).a
+        voxelValuePadded(b0 - c1) - voxelValuePadded(b0 + c1),
+        voxelValuePadded(b0 - c3) - voxelValuePadded(b0 + c3),
+        voxelValuePadded(b0 - c4) - voxelValuePadded(b0 + c4)
     ));
     vec3 n1 = -normalize(vec3(
-        voxelPadded(b1 - c1).a - voxelPadded(b1 + c1).a,
-        voxelPadded(b1 - c3).a - voxelPadded(b1 + c3).a,
-        voxelPadded(b1 - c4).a - voxelPadded(b1 + c4).a
+        voxelValuePadded(b1 - c1) - voxelValuePadded(b1 + c1),
+        voxelValuePadded(b1 - c3) - voxelValuePadded(b1 + c3),
+        voxelValuePadded(b1 - c4) - voxelValuePadded(b1 + c4)
     ));
     gl_FragData[2].xyz = -vec3(
         n0.x + t * (n0.x - n1.x),
@@ -293,6 +318,6 @@ void main(void) {
     }
 
     // apply normal matrix
-    gl_FragData[2].xyz *= transpose3(inverse3(mat3(uGridTransform)));
+    gl_FragData[2].xyz = uGridTransformAdjoint * gl_FragData[2].xyz;
 }
 `;

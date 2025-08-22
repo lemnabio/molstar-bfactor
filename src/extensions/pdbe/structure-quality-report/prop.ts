@@ -29,7 +29,7 @@ export { StructureQualityReport };
 type StructureQualityReport = PropertyWrapper<{
     issues: IndexedCustomProperty.Residue<string[]>,
     issueTypes: string[]
-}| undefined>
+} | undefined>
 
 namespace StructureQualityReport {
     export const DefaultServerUrl = 'https://www.ebi.ac.uk/pdbe/api/validation/residuewise_outlier_summary/entry/';
@@ -38,7 +38,7 @@ namespace StructureQualityReport {
     }
 
     export function isApplicable(model?: Model): boolean {
-        return !!model && Model.isFromPdbArchive(model);
+        return !!model && Model.hasPdbId(model);
     }
 
     export const Schema = {

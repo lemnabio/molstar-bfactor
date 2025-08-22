@@ -1,271 +1,498 @@
 /**
- * Copyright (c) 2019-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import { PickingId } from '../../mol-geo/geometry/picking';
-import { Renderer } from '../../mol-gl/renderer';
+import { PickType, Renderer } from '../../mol-gl/renderer';
 import { Scene } from '../../mol-gl/scene';
+import { PixelPackBuffer } from '../../mol-gl/webgl/buffer';
+import { isWebGL2 } from '../../mol-gl/webgl/compat';
 import { WebGLContext } from '../../mol-gl/webgl/context';
-import { GraphicsRenderVariant } from '../../mol-gl/webgl/render-item';
+import { Framebuffer } from '../../mol-gl/webgl/framebuffer';
 import { RenderTarget } from '../../mol-gl/webgl/render-target';
+import { Renderbuffer } from '../../mol-gl/webgl/renderbuffer';
+import { Texture } from '../../mol-gl/webgl/texture';
 import { Vec3 } from '../../mol-math/linear-algebra';
-import { spiral2d } from '../../mol-math/misc';
-import { decodeFloatRGB, unpackRGBAToDepth } from '../../mol-util/float-packing';
-import { Camera, ICamera } from '../camera';
-import { StereoCamera } from '../camera/stereo';
-import { cameraUnproject } from '../camera/util';
+import { isDebugMode, isTimingMode } from '../../mol-util/debug';
+import { now } from '../../mol-util/now';
+import { unpackRGBAToDepth, unpackRGBToInt } from '../../mol-util/number-packing';
+import { ICamera } from '../camera';
 import { Viewport } from '../camera/util';
 import { Helper } from '../helper/helper';
-import { DrawPass } from './draw';
 
 const NullId = Math.pow(2, 24) - 2;
 
 export type PickData = { id: PickingId, position: Vec3 }
 
+export type AsyncPickData = {
+    tryGet: () => 'pending' | PickData | undefined,
+}
+
+export const DefaultPickOptions = {
+    pickPadding: 1,
+    maxAsyncReadLag: 5,
+};
+export type PickOptions = typeof DefaultPickOptions
+
+//
+
 export class PickPass {
-    readonly objectPickTarget: RenderTarget
-    readonly instancePickTarget: RenderTarget
-    readonly groupPickTarget: RenderTarget
-    readonly depthPickTarget: RenderTarget
+    private readonly objectPickTarget: RenderTarget;
+    private readonly instancePickTarget: RenderTarget;
+    private readonly groupPickTarget: RenderTarget;
+    private readonly depthPickTarget: RenderTarget;
 
-    private pickWidth: number
-    private pickHeight: number
+    private readonly framebuffer: Framebuffer;
 
-    constructor(private webgl: WebGLContext, private drawPass: DrawPass, readonly pickBaseScale: number) {
-        const pickScale = pickBaseScale / webgl.pixelRatio;
-        this.pickWidth = Math.ceil(drawPass.colorTarget.getWidth() * pickScale);
-        this.pickHeight = Math.ceil(drawPass.colorTarget.getHeight() * pickScale);
+    private readonly objectPickTexture: Texture;
+    private readonly instancePickTexture: Texture;
+    private readonly groupPickTexture: Texture;
+    private readonly depthPickTexture: Texture;
 
-        this.objectPickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
-        this.instancePickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
-        this.groupPickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
-        this.depthPickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
+    private readonly objectPickFramebuffer: Framebuffer;
+    private readonly instancePickFramebuffer: Framebuffer;
+    private readonly groupPickFramebuffer: Framebuffer;
+    private readonly depthPickFramebuffer: Framebuffer;
+
+    private readonly depthRenderbuffer: Renderbuffer;
+
+    private pickWidth: number;
+    private pickHeight: number;
+
+    constructor(private webgl: WebGLContext, private width: number, private height: number, private pickScale: number) {
+        const pickRatio = pickScale / webgl.pixelRatio;
+        this.pickWidth = Math.ceil(width * pickRatio);
+        this.pickHeight = Math.ceil(height * pickRatio);
+
+        const { resources, extensions: { drawBuffers }, gl } = webgl;
+
+        if (drawBuffers) {
+            this.objectPickTexture = resources.texture('image-uint8', 'rgba', 'ubyte', 'nearest');
+            this.objectPickTexture.define(this.pickWidth, this.pickHeight);
+
+            this.instancePickTexture = resources.texture('image-uint8', 'rgba', 'ubyte', 'nearest');
+            this.instancePickTexture.define(this.pickWidth, this.pickHeight);
+
+            this.groupPickTexture = resources.texture('image-uint8', 'rgba', 'ubyte', 'nearest');
+            this.groupPickTexture.define(this.pickWidth, this.pickHeight);
+
+            this.depthPickTexture = resources.texture('image-uint8', 'rgba', 'ubyte', 'nearest');
+            this.depthPickTexture.define(this.pickWidth, this.pickHeight);
+
+            this.framebuffer = resources.framebuffer();
+
+            this.objectPickFramebuffer = resources.framebuffer();
+            this.instancePickFramebuffer = resources.framebuffer();
+            this.groupPickFramebuffer = resources.framebuffer();
+            this.depthPickFramebuffer = resources.framebuffer();
+
+            this.framebuffer.bind();
+            drawBuffers!.drawBuffers([
+                drawBuffers!.COLOR_ATTACHMENT0,
+                drawBuffers!.COLOR_ATTACHMENT1,
+                drawBuffers!.COLOR_ATTACHMENT2,
+                drawBuffers!.COLOR_ATTACHMENT3,
+            ]);
+
+            this.objectPickTexture.attachFramebuffer(this.framebuffer, 'color0');
+            this.instancePickTexture.attachFramebuffer(this.framebuffer, 'color1');
+            this.groupPickTexture.attachFramebuffer(this.framebuffer, 'color2');
+            this.depthPickTexture.attachFramebuffer(this.framebuffer, 'color3');
+
+            this.depthRenderbuffer = isWebGL2(gl)
+                ? resources.renderbuffer('depth32f', 'depth', this.pickWidth, this.pickHeight)
+                : resources.renderbuffer('depth16', 'depth', this.pickWidth, this.pickHeight);
+
+            this.depthRenderbuffer.attachFramebuffer(this.framebuffer);
+
+            this.objectPickTexture.attachFramebuffer(this.objectPickFramebuffer, 'color0');
+            this.instancePickTexture.attachFramebuffer(this.instancePickFramebuffer, 'color0');
+            this.groupPickTexture.attachFramebuffer(this.groupPickFramebuffer, 'color0');
+            this.depthPickTexture.attachFramebuffer(this.depthPickFramebuffer, 'color0');
+        } else {
+            this.objectPickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
+            this.instancePickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
+            this.groupPickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
+            this.depthPickTarget = webgl.createRenderTarget(this.pickWidth, this.pickHeight);
+        }
+    }
+
+    dispose() {
+        if (this.webgl.extensions.drawBuffers) {
+            this.framebuffer.destroy();
+
+            this.objectPickTexture.destroy();
+            this.instancePickTexture.destroy();
+            this.groupPickTexture.destroy();
+            this.depthPickTexture.destroy();
+
+            this.objectPickFramebuffer.destroy();
+            this.instancePickFramebuffer.destroy();
+            this.groupPickFramebuffer.destroy();
+            this.depthPickFramebuffer.destroy();
+
+            this.depthRenderbuffer.destroy();
+        } else {
+            this.objectPickTarget.destroy();
+            this.instancePickTarget.destroy();
+            this.groupPickTarget.destroy();
+            this.depthPickTarget.destroy();
+        }
+    }
+
+    get pickRatio() {
+        return this.pickScale / this.webgl.pixelRatio;
+    }
+
+    setPickScale(pickScale: number) {
+        this.pickScale = pickScale;
+        this.setSize(this.width, this.height);
+    }
+
+    bindObject() {
+        if (this.webgl.extensions.drawBuffers) {
+            this.objectPickFramebuffer.bind();
+        } else {
+            this.objectPickTarget.bind();
+        }
+    }
+
+    bindInstance() {
+        if (this.webgl.extensions.drawBuffers) {
+            this.instancePickFramebuffer.bind();
+        } else {
+            this.instancePickTarget.bind();
+        }
+    }
+
+    bindGroup() {
+        if (this.webgl.extensions.drawBuffers) {
+            this.groupPickFramebuffer.bind();
+        } else {
+            this.groupPickTarget.bind();
+        }
+    }
+
+    bindDepth() {
+        if (this.webgl.extensions.drawBuffers) {
+            this.depthPickFramebuffer.bind();
+        } else {
+            this.depthPickTarget.bind();
+        }
     }
 
     get drawingBufferHeight() {
-        return this.drawPass.colorTarget.getHeight();
+        return this.height;
     }
 
-    syncSize() {
-        const pickScale = this.pickBaseScale / this.webgl.pixelRatio;
-        const pickWidth = Math.ceil(this.drawPass.colorTarget.getWidth() * pickScale);
-        const pickHeight = Math.ceil(this.drawPass.colorTarget.getHeight() * pickScale);
+    setSize(width: number, height: number) {
+        this.width = width;
+        this.height = height;
+
+        const pickRatio = this.pickScale / this.webgl.pixelRatio;
+        const pickWidth = Math.ceil(this.width * pickRatio);
+        const pickHeight = Math.ceil(this.height * pickRatio);
 
         if (pickWidth !== this.pickWidth || pickHeight !== this.pickHeight) {
             this.pickWidth = pickWidth;
             this.pickHeight = pickHeight;
 
-            this.objectPickTarget.setSize(this.pickWidth, this.pickHeight);
-            this.instancePickTarget.setSize(this.pickWidth, this.pickHeight);
-            this.groupPickTarget.setSize(this.pickWidth, this.pickHeight);
-            this.depthPickTarget.setSize(this.pickWidth, this.pickHeight);
+            if (this.webgl.extensions.drawBuffers) {
+                this.objectPickTexture.define(this.pickWidth, this.pickHeight);
+                this.instancePickTexture.define(this.pickWidth, this.pickHeight);
+                this.groupPickTexture.define(this.pickWidth, this.pickHeight);
+                this.depthPickTexture.define(this.pickWidth, this.pickHeight);
+
+                this.depthRenderbuffer.setSize(this.pickWidth, this.pickHeight);
+            } else {
+                this.objectPickTarget.setSize(this.pickWidth, this.pickHeight);
+                this.instancePickTarget.setSize(this.pickWidth, this.pickHeight);
+                this.groupPickTarget.setSize(this.pickWidth, this.pickHeight);
+                this.depthPickTarget.setSize(this.pickWidth, this.pickHeight);
+            }
         }
     }
 
-    private renderVariant(renderer: Renderer, camera: ICamera, scene: Scene, helper: Helper, variant: GraphicsRenderVariant) {
-        const depth = this.drawPass.depthTexturePrimitives;
-        renderer.clear(false);
+    reset() {
+        const { drawBuffers } = this.webgl.extensions;
 
-        renderer.update(camera);
-        renderer.renderPick(scene.primitives, camera, variant, null);
-        renderer.renderPick(scene.volumes, camera, variant, depth);
-        renderer.renderPick(helper.handle.scene, camera, variant, null);
+        if (drawBuffers) {
+            this.framebuffer.bind();
+            drawBuffers!.drawBuffers([
+                drawBuffers!.COLOR_ATTACHMENT0,
+                drawBuffers!.COLOR_ATTACHMENT1,
+                drawBuffers!.COLOR_ATTACHMENT2,
+                drawBuffers!.COLOR_ATTACHMENT3,
+            ]);
+
+            this.objectPickTexture.attachFramebuffer(this.framebuffer, 'color0');
+            this.instancePickTexture.attachFramebuffer(this.framebuffer, 'color1');
+            this.groupPickTexture.attachFramebuffer(this.framebuffer, 'color2');
+            this.depthPickTexture.attachFramebuffer(this.framebuffer, 'color3');
+
+            this.depthRenderbuffer.attachFramebuffer(this.framebuffer);
+
+            this.objectPickTexture.attachFramebuffer(this.objectPickFramebuffer, 'color0');
+            this.instancePickTexture.attachFramebuffer(this.instancePickFramebuffer, 'color0');
+            this.groupPickTexture.attachFramebuffer(this.groupPickFramebuffer, 'color0');
+            this.depthPickTexture.attachFramebuffer(this.depthPickFramebuffer, 'color0');
+        }
+    }
+
+    private renderVariant(renderer: Renderer, camera: ICamera, scene: Scene, helper: Helper, variant: 'pick' | 'depth', pickType: number) {
+        renderer.clear(false);
+        renderer.update(camera, scene);
+        renderer.renderPick(scene.primitives, camera, variant, pickType);
+
+        if (helper.handle.isEnabled) {
+            renderer.renderPick(helper.handle.scene, camera, variant, pickType);
+        }
 
         if (helper.camera.isEnabled) {
             helper.camera.update(camera);
-            renderer.update(helper.camera.camera);
-            renderer.renderPick(helper.camera.scene, helper.camera.camera, variant, null);
+            renderer.update(helper.camera.camera, helper.camera.scene);
+            renderer.renderPick(helper.camera.scene, helper.camera.camera, variant, pickType);
         }
     }
 
     render(renderer: Renderer, camera: ICamera, scene: Scene, helper: Helper) {
-        this.objectPickTarget.bind();
-        this.renderVariant(renderer, camera, scene, helper, 'pickObject');
+        if (this.webgl.extensions.drawBuffers) {
+            this.framebuffer.bind();
+            this.renderVariant(renderer, camera, scene, helper, 'pick', PickType.None);
+            // printTextureImage(readTexture(this.webgl, this.groupPickTexture, new Uint8Array(this.pickWidth * this.pickHeight * 4)), { scale: 16, id: 'group', pixelated: true, useCanvas: true, flipY: true });
+        } else {
+            this.objectPickTarget.bind();
+            this.renderVariant(renderer, camera, scene, helper, 'pick', PickType.Object);
 
-        this.instancePickTarget.bind();
-        this.renderVariant(renderer, camera, scene, helper, 'pickInstance');
+            this.instancePickTarget.bind();
+            this.renderVariant(renderer, camera, scene, helper, 'pick', PickType.Instance);
 
-        this.groupPickTarget.bind();
-        this.renderVariant(renderer, camera, scene, helper, 'pickGroup');
-        // printTexture(this.webgl, this.groupPickTarget.texture, { id: 'group' })
+            this.groupPickTarget.bind();
+            this.renderVariant(renderer, camera, scene, helper, 'pick', PickType.Group);
+            // printTextureImage(readTexture(this.webgl, this.groupPickTarget.texture, new Uint8Array(this.pickWidth * this.pickHeight * 4)), { scale: 16, id: 'group', pixelated: true, useCanvas: true, flipY: true });
 
-        this.depthPickTarget.bind();
-        this.renderVariant(renderer, camera, scene, helper, 'depth');
+            this.depthPickTarget.bind();
+            this.renderVariant(renderer, camera, scene, helper, 'depth', PickType.None);
+        }
     }
 }
 
-export class PickHelper {
-    dirty = true
+let AsyncPickingWarningShown = false;
 
-    private objectBuffer: Uint8Array
-    private instanceBuffer: Uint8Array
-    private groupBuffer: Uint8Array
-    private depthBuffer: Uint8Array
+export function checkAsyncPickingSupport(webgl: WebGLContext): boolean {
+    if (webgl.isWebGL2) return true;
 
-    private viewport = Viewport()
+    if (isDebugMode && !AsyncPickingWarningShown) {
+        console.log('WebGL2 required for async picking. Falling back to synchronous picking.');
+        AsyncPickingWarningShown = true;
+    }
+    return false;
+}
 
-    private pickScale: number
-    private pickX: number
-    private pickY: number
-    private pickWidth: number
-    private pickHeight: number
-    private halfPickWidth: number
+export enum AsyncPickStatus { Pending, Resolved, Failed };
 
-    private spiral: [number, number][]
+export class PickBuffers {
+    private object: Uint8Array;
+    private instance: Uint8Array;
+    private group: Uint8Array;
+    private depth: Uint8Array;
 
-    private setupBuffers() {
-        const bufferSize = this.pickWidth * this.pickHeight * 4;
-        if (!this.objectBuffer || this.objectBuffer.length !== bufferSize) {
-            this.objectBuffer = new Uint8Array(bufferSize);
-            this.instanceBuffer = new Uint8Array(bufferSize);
-            this.groupBuffer = new Uint8Array(bufferSize);
-            this.depthBuffer = new Uint8Array(bufferSize);
+    private objectBuffer: PixelPackBuffer;
+    private instanceBuffer: PixelPackBuffer;
+    private groupBuffer: PixelPackBuffer;
+    private depthBuffer: PixelPackBuffer;
+
+    private viewport = Viewport.create(0, 0, 0, 0);
+
+    private setup() {
+        const size = this.viewport.width * this.viewport.height * 4;
+        if (!this.object || this.object.length !== size) {
+            this.object = new Uint8Array(size);
+            this.instance = new Uint8Array(size);
+            this.group = new Uint8Array(size);
+            this.depth = new Uint8Array(size);
         }
     }
 
     setViewport(x: number, y: number, width: number, height: number) {
         Viewport.set(this.viewport, x, y, width, height);
+        this.setup();
+    }
 
-        this.pickScale = this.pickPass.pickBaseScale / this.webgl.pixelRatio;
-        this.pickX = Math.ceil(x * this.pickScale);
-        this.pickY = Math.ceil(y * this.pickScale);
+    read() {
+        if (isTimingMode) this.webgl.timer.mark('PickBuffers.read');
+        const { x, y, width, height } = this.viewport;
 
-        const pickWidth = Math.floor(width * this.pickScale);
-        const pickHeight = Math.floor(height * this.pickScale);
+        this.pickPass.bindObject();
+        this.webgl.readPixels(x, y, width, height, this.object);
 
-        if (pickWidth !== this.pickWidth || pickHeight !== this.pickHeight) {
-            this.pickWidth = pickWidth;
-            this.pickHeight = pickHeight;
-            this.halfPickWidth = Math.floor(this.pickWidth / 2);
+        this.pickPass.bindInstance();
+        this.webgl.readPixels(x, y, width, height, this.instance);
 
-            this.setupBuffers();
+        this.pickPass.bindGroup();
+        this.webgl.readPixels(x, y, width, height, this.group);
+
+        this.pickPass.bindDepth();
+        this.webgl.readPixels(x, y, width, height, this.depth);
+
+        this.ready = true;
+        if (isTimingMode) this.webgl.timer.markEnd('PickBuffers.read');
+    }
+
+    private fenceSync: WebGLSync | null = null;
+    private fenceTimestamp: number = 0;
+
+    private ready = false;
+    private lag = 0;
+
+    asyncRead() {
+        const { gl } = this.webgl;
+        if (!isWebGL2(gl)) return;
+
+        if (isTimingMode) this.webgl.timer.mark('PickBuffers.asyncRead');
+        if (this.fenceSync !== null) {
+            gl.deleteSync(this.fenceSync);
         }
+        const { x, y, width, height } = this.viewport;
 
-        this.spiral = spiral2d(Math.round(this.pickScale * this.pickPadding));
+        this.pickPass.bindObject();
+        this.objectBuffer.read(x, y, width, height);
+
+        this.pickPass.bindInstance();
+        this.instanceBuffer.read(x, y, width, height);
+
+        this.pickPass.bindGroup();
+        this.groupBuffer.read(x, y, width, height);
+
+        this.pickPass.bindDepth();
+        this.depthBuffer.read(x, y, width, height);
+
+        this.fenceTimestamp = now();
+        this.fenceSync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        // gl.flush();
+
+        this.ready = false;
+        if (isTimingMode) this.webgl.timer.markEnd('PickBuffers.asyncRead');
     }
 
-    private syncBuffers() {
-        const { pickX, pickY, pickWidth, pickHeight } = this;
+    check(): AsyncPickStatus {
+        if (this.ready) return AsyncPickStatus.Resolved;
+        if (this.fenceSync === null) return AsyncPickStatus.Failed;
 
-        this.pickPass.objectPickTarget.bind();
-        this.webgl.readPixels(pickX, pickY, pickWidth, pickHeight, this.objectBuffer);
+        const { gl } = this.webgl;
+        if (!isWebGL2(gl)) return AsyncPickStatus.Failed;
 
-        this.pickPass.instancePickTarget.bind();
-        this.webgl.readPixels(pickX, pickY, pickWidth, pickHeight, this.instanceBuffer);
+        const res = gl.clientWaitSync(this.fenceSync, 0, 0);
+        if (res === gl.WAIT_FAILED || this.lag >= this.maxAsyncReadLag) {
+            // console.log(`failed to get buffer data after ${this.lag + 1} checks`);
+            if (res !== gl.WAIT_FAILED && now() - this.fenceTimestamp < 1000 / 60) {
+                this.lag += 1;
+                return AsyncPickStatus.Pending;
+            }
+            gl.deleteSync(this.fenceSync);
+            this.fenceSync = null;
+            this.lag = 0;
+            this.ready = false;
+            return AsyncPickStatus.Failed;
+        } else if (res === gl.TIMEOUT_EXPIRED) {
+            this.lag += 1;
+            // console.log(`waiting for buffer data for ${this.lag} checks`);
+            return AsyncPickStatus.Pending;
+        } else {
+            this.objectBuffer.getSubData(this.object);
+            this.instanceBuffer.getSubData(this.instance);
+            this.groupBuffer.getSubData(this.group);
+            this.depthBuffer.getSubData(this.depth);
 
-        this.pickPass.groupPickTarget.bind();
-        this.webgl.readPixels(pickX, pickY, pickWidth, pickHeight, this.groupBuffer);
+            // console.log(`got buffer data after ${this.lag + 1} checks`);
+            gl.deleteSync(this.fenceSync);
+            this.fenceSync = null;
+            this.lag = 0;
+            this.ready = true;
 
-        this.pickPass.depthPickTarget.bind();
-        this.webgl.readPixels(pickX, pickY, pickWidth, pickHeight, this.depthBuffer);
+            return AsyncPickStatus.Resolved;
+        }
     }
 
-    private getBufferIdx(x: number, y: number): number {
-        return (y * this.pickWidth + x) * 4;
+    private getIdx(x: number, y: number): number {
+        return (y * this.viewport.width + x) * 4;
     }
 
-    private getDepth(x: number, y: number): number {
-        const idx = this.getBufferIdx(x, y);
-        const b = this.depthBuffer;
+    getDepth(x: number, y: number): number {
+        if (!this.ready) return -1;
+
+        const idx = this.getIdx(x, y);
+        const b = this.depth;
         return unpackRGBAToDepth(b[idx], b[idx + 1], b[idx + 2], b[idx + 3]);
     }
 
     private getId(x: number, y: number, buffer: Uint8Array) {
-        const idx = this.getBufferIdx(x, y);
-        return decodeFloatRGB(buffer[idx], buffer[idx + 1], buffer[idx + 2]);
+        if (!this.ready) return -1;
+
+        const idx = this.getIdx(x, y);
+        return unpackRGBToInt(buffer[idx], buffer[idx + 1], buffer[idx + 2]);
     }
 
-    private render(camera: Camera | StereoCamera) {
-        const { pickX, pickY, pickWidth, pickHeight, halfPickWidth } = this;
-        const { renderer, scene, helper } = this;
-
-        renderer.setTransparentBackground(false);
-        renderer.setDrawingBufferSize(this.pickPass.objectPickTarget.getWidth(), this.pickPass.objectPickTarget.getHeight());
-        renderer.setPixelRatio(this.pickScale);
-
-        if (StereoCamera.is(camera)) {
-            renderer.setViewport(pickX, pickY, halfPickWidth, pickHeight);
-            this.pickPass.render(renderer, camera.left, scene, helper);
-
-            renderer.setViewport(pickX + halfPickWidth, pickY, pickWidth - halfPickWidth, pickHeight);
-            this.pickPass.render(renderer, camera.right, scene, helper);
-        } else {
-            renderer.setViewport(pickX, pickY, pickWidth, pickHeight);
-            this.pickPass.render(renderer, camera, scene, helper);
-        }
-
-        this.dirty = false;
+    getObjectId(x: number, y: number) {
+        return this.getId(x, y, this.object);
     }
 
-    private identifyInternal(x: number, y: number, camera: Camera | StereoCamera): PickData | undefined {
-        const { webgl, pickScale } = this;
-        if (webgl.isContextLost) return;
+    getInstanceId(x: number, y: number) {
+        return this.getId(x, y, this.instance);
+    }
 
-        x *= webgl.pixelRatio;
-        y *= webgl.pixelRatio;
-        y = this.pickPass.drawingBufferHeight - y; // flip y
+    getGroupId(x: number, y: number) {
+        return this.getId(x, y, this.group);
+    }
 
-        const { viewport } = this;
-
-        // check if within viewport
-        if (x < viewport.x ||
-            y < viewport.y ||
-            x > viewport.x + viewport.width ||
-            y > viewport.y + viewport.height
-        ) return;
-
-        if (this.dirty) {
-            this.render(camera);
-            this.syncBuffers();
-        }
-
-        const xv = x - viewport.x;
-        const yv = y - viewport.y;
-
-        const xp = Math.floor(xv * pickScale);
-        const yp = Math.floor(yv * pickScale);
-
-        const objectId = this.getId(xp, yp, this.objectBuffer);
+    getPickingId(x: number, y: number): PickingId | undefined {
+        const objectId = this.getObjectId(x, y);
         // console.log('objectId', objectId);
         if (objectId === -1 || objectId === NullId) return;
 
-        const instanceId = this.getId(xp, yp, this.instanceBuffer);
+        const instanceId = this.getInstanceId(x, y);
         // console.log('instanceId', instanceId);
         if (instanceId === -1 || instanceId === NullId) return;
 
-        const groupId = this.getId(xp, yp, this.groupBuffer);
+        const groupId = this.getGroupId(x, y);
         // console.log('groupId', groupId);
         if (groupId === -1 || groupId === NullId) return;
 
-        const z = this.getDepth(xp, yp);
-        const position = Vec3.create(x, viewport.height - y, z);
-        if (StereoCamera.is(camera)) {
-            const halfWidth = Math.floor(viewport.width / 2);
-            if (x > viewport.x + halfWidth) {
-                position[0] = viewport.x + (xv - halfWidth) * 2;
-                cameraUnproject(position, position, viewport, camera.right.inverseProjectionView);
-            } else {
-                position[0] = viewport.x + xv * 2;
-                cameraUnproject(position, position, viewport, camera.left.inverseProjectionView);
-            }
-        } else {
-            cameraUnproject(position, position, viewport, camera.inverseProjectionView);
-        }
-
-        // console.log({ { objectId, instanceId, groupId }, position} );
-        return { id: { objectId, instanceId, groupId }, position };
+        return { objectId, instanceId, groupId };
     }
 
-    identify(x: number, y: number, camera: Camera | StereoCamera): PickData | undefined {
-        for (const d of this.spiral) {
-            const pickData = this.identifyInternal(x + d[0], y + d[1], camera);
-            if (pickData) return pickData;
+    reset() {
+        this.fenceSync = null;
+        this.ready = false;
+        this.lag = 0;
+        this.fenceTimestamp = 0;
+    }
+
+    dispose() {
+        const { gl } = this.webgl;
+        if (!isWebGL2(gl)) return;
+
+        this.objectBuffer.destroy();
+        this.instanceBuffer.destroy();
+        this.groupBuffer.destroy();
+        this.depthBuffer.destroy();
+
+        if (this.fenceSync !== null) {
+            gl.deleteSync(this.fenceSync);
+            this.fenceSync = null;
         }
     }
 
-    constructor(private webgl: WebGLContext, private renderer: Renderer, private scene: Scene, private helper: Helper, private pickPass: PickPass, viewport: Viewport, readonly pickPadding = 1) {
-        this.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+    constructor(private webgl: WebGLContext, private pickPass: PickPass, public maxAsyncReadLag = 5) {
+        if (webgl.isWebGL2) {
+            this.objectBuffer = webgl.resources.pixelPack('rgba', 'ubyte');
+            this.instanceBuffer = webgl.resources.pixelPack('rgba', 'ubyte');
+            this.groupBuffer = webgl.resources.pixelPack('rgba', 'ubyte');
+            this.depthBuffer = webgl.resources.pixelPack('rgba', 'ubyte');
+        }
+
+        this.setup();
     }
 }

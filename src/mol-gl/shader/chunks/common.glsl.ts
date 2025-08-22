@@ -1,16 +1,8 @@
 export const common = `
 // TODO find a better place for these convenience defines
 
-#if defined(dRenderVariant_colorBlended) || defined(dRenderVariant_colorWboit)
+#if defined(dRenderVariant_colorBlended) || defined(dRenderVariant_colorWboit) || defined(dRenderVariant_colorDpoit)
     #define dRenderVariant_color
-#endif
-
-#if defined(dRenderVariant_pickObject) || defined(dRenderVariant_pickInstance) || defined(dRenderVariant_pickGroup)
-    #define dRenderVariant_pick
-#endif
-
-#if defined(dRenderVariant_markingDepth) || defined(dRenderVariant_markingMask)
-    #define dRenderVariant_marking
 #endif
 
 #if defined(dColorType_instance) || defined(dColorType_group) || defined(dColorType_groupInstance) || defined(dColorType_vertex) || defined(dColorType_vertexInstance)
@@ -25,13 +17,38 @@ export const common = `
     #define dColorType_varying
 #endif
 
+#if ((defined(dRenderVariant_color) || defined(dRenderVariant_tracing)) && defined(dColorMarker)) || defined(dRenderVariant_marking)
+    #define dNeedsMarker
+#endif
+
+#if defined(dXrayShaded_on) || defined(dXrayShaded_inverted)
+    #define dXrayShaded
+#endif
+
+#if defined(dRenderVariant_color) || defined(dRenderVariant_tracing) || ((defined(dRenderVariant_depth) || defined(dRenderVariant_pick)) && defined(dXrayShaded))
+    #define dNeedsNormal
+#endif
+
+#define MaskAll 0
+#define MaskOpaque 1
+#define MaskTransparent 2
+
 //
 
 #define PI 3.14159265
 #define RECIPROCAL_PI 0.31830988618
 #define EPSILON 1e-6
+#define ONE_MINUS_EPSILON 1.0 - EPSILON
+#define TWO_PI 6.2831853
+#define HALF_PI 1.570796325
+
+#define PALETTE_SCALE 16777214.0 // (1 << 24) - 2
 
 #define saturate(a) clamp(a, 0.0, 1.0)
+
+#if __VERSION__ == 100
+    #define round(x) floor((x) + 0.5)
+#endif
 
 float intDiv(const in float a, const in float b) { return float(int(a) / int(b)); }
 vec2 ivec2Div(const in vec2 a, const in vec2 b) { return vec2(ivec2(a) / ivec2(b)); }
@@ -40,13 +57,8 @@ int imod(const in int a, const in int b) { return a - b * (a / b); }
 
 float pow2(const in float x) { return x * x; }
 
-const float maxFloat = 10000.0; // NOTE constant also set in TypeScript
-const float floatLogFactor = 9.210440366976517; // log(maxFloat + 1.0);
-float encodeFloatLog(const in float value) { return log(value + 1.0) / floatLogFactor; }
-float decodeFloatLog(const in float value) { return exp(value * floatLogFactor) - 1.0; }
-
-vec3 encodeFloatRGB(in float value) {
-    value = clamp(value, 0.0, 16777216.0 - 1.0) + 1.0;
+vec3 packIntToRGB(in float value) {
+    value = clamp(round(value), 0.0, 16777216.0 - 1.0) + 1.0;
     vec3 c = vec3(0.0);
     c.b = mod(value, 256.0);
     value = floor(value / 256.0);
@@ -55,8 +67,8 @@ vec3 encodeFloatRGB(in float value) {
     c.r = mod(value, 256.0);
     return c / 255.0;
 }
-float decodeFloatRGB(const in vec3 rgb) {
-    return (rgb.r * 256.0 * 256.0 * 255.0 + rgb.g * 256.0 * 255.0 + rgb.b * 255.0) - 1.0;
+float unpackRGBToInt(const in vec3 rgb) {
+    return (floor(rgb.r * 255.0 + 0.5) * 256.0 * 256.0 + floor(rgb.g * 255.0 + 0.5) * 256.0 + floor(rgb.b * 255.0 + 0.5)) - 1.0;
 }
 
 vec2 packUnitIntervalToRG(const in float v) {
@@ -93,11 +105,26 @@ float unpackRGBAToDepth(const in vec4 v) {
     return dot(v, UnpackFactors);
 }
 
+vec4 packDepthWithAlphaToRGBA(const in float depth, const in float alpha){
+    vec3 r = vec3(fract(depth * PackFactors.yz), depth);
+    r.yz -= r.xy * ShiftRight8; // tidy overflow
+    return vec4(r * PackUpscale, alpha);
+}
+vec2 unpackRGBAToDepthWithAlpha(const in vec4 v) {
+    return vec2(dot(v.xyz, UnpackFactors.yzw), v.w);
+}
+
 vec4 sRGBToLinear(const in vec4 c) {
     return vec4(mix(pow(c.rgb * 0.9478672986 + vec3(0.0521327014), vec3(2.4)), c.rgb * 0.0773993808, vec3(lessThanEqual(c.rgb, vec3(0.04045)))), c.a);
 }
 vec4 linearTosRGB(const in vec4 c) {
     return vec4(mix(pow(c.rgb, vec3(0.41666)) * 1.055 - vec3(0.055), c.rgb * 12.92, vec3(lessThanEqual(c.rgb, vec3(0.0031308)))), c.a);
+}
+
+float luminance(vec3 c) {
+    // https://www.w3.org/TR/WCAG21/#dfn-relative-luminance
+    const vec3 W = vec3(0.2125, 0.7154, 0.0721);
+    return dot(c, W);
 }
 
 float linearizeDepth(const in float depth, const in float near, const in float far) {
@@ -114,6 +141,15 @@ float orthographicDepthToViewZ(const in float linearClipZ, const in float near, 
 
 float depthToViewZ(const in float isOrtho, const in float linearClipZ, const in float near, const in float far) {
     return isOrtho == 1.0 ? orthographicDepthToViewZ(linearClipZ, near, far) : perspectiveDepthToViewZ(linearClipZ, near, far);
+}
+
+// see https://github.com/graphitemaster/normals_revisited and https://www.shadertoy.com/view/3s33zj
+mat3 adjoint(const in mat4 m) {
+    return mat3(
+        cross(m[1].xyz, m[2].xyz),
+        cross(m[2].xyz, m[0].xyz),
+        cross(m[0].xyz, m[1].xyz)
+    );
 }
 
 #if __VERSION__ == 100
@@ -214,6 +250,9 @@ float depthToViewZ(const in float isOrtho, const in float linearClipZ, const in 
             a31 * b01 - a30 * b03 - a32 * b00,
             a20 * b03 - a21 * b01 + a22 * b00) / det;
     }
+
+    #define isNaN(x) ((x) != (x))
+    #define isInf(x) ((x) == (x) + 1.0)
 #else
     #define transpose2(m) transpose(m)
     #define transpose3(m) transpose(m)
@@ -222,5 +261,8 @@ float depthToViewZ(const in float isOrtho, const in float linearClipZ, const in 
     #define inverse2(m) inverse(m)
     #define inverse3(m) inverse(m)
     #define inverse4(m) inverse(m)
+
+    #define isNaN isnan
+    #define isInf isinf
 #endif
 `;

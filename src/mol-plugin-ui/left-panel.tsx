@@ -1,23 +1,39 @@
 /**
- * Copyright (c) 2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2023 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
 
 import * as React from 'react';
-import { Canvas3DParams } from '../mol-canvas3d/canvas3d';
+import { throttleTime } from 'rxjs';
+import { Canvas3DContext, Canvas3DParams } from '../mol-canvas3d/canvas3d';
 import { PluginCommands } from '../mol-plugin/commands';
 import { LeftPanelTabName } from '../mol-plugin/layout';
 import { StateTransform } from '../mol-state';
 import { ParamDefinition as PD } from '../mol-util/param-definition';
 import { PluginUIComponent } from './base';
 import { IconButton, SectionHeader } from './controls/common';
+import { AccountTreeOutlinedSvg, DeleteOutlinedSvg, HelpOutlineSvg, HomeOutlinedSvg, SaveOutlinedSvg, TuneSvg } from './controls/icons';
 import { ParameterControls } from './controls/parameters';
 import { StateObjectActions } from './state/actions';
 import { RemoteStateSnapshots, StateSnapshots } from './state/snapshots';
 import { StateTree } from './state/tree';
 import { HelpContent } from './viewport/help';
-import { HomeOutlinedSvg, AccountTreeOutlinedSvg, TuneSvg, HelpOutlineSvg, SaveOutlinedSvg, DeleteOutlinedSvg } from './controls/icons';
+
+export class CustomImportControls extends PluginUIComponent<{ initiallyCollapsed?: boolean }> {
+    componentDidMount() {
+        this.subscribe(this.plugin.state.behaviors.events.changed, () => this.forceUpdate());
+    }
+
+    render() {
+        const controls: JSX.Element[] = [];
+        this.plugin.customImportControls.forEach((Controls, key) => {
+            controls.push(<Controls initiallyCollapsed={this.props.initiallyCollapsed} key={key} />);
+        });
+        return controls.length > 0 ? <>{controls}</> : null;
+    }
+}
 
 export class LeftPanelControls extends PluginUIComponent<{}, { tab: LeftPanelTabName }> {
     state = { tab: this.plugin.behaviors.layout.leftPanelTabName.value };
@@ -47,13 +63,14 @@ export class LeftPanelControls extends PluginUIComponent<{}, { tab: LeftPanelTab
         if (this.plugin.layout.state.regionState.left !== 'full') {
             PluginCommands.Layout.Update(this.plugin, { state: { regionState: { ...this.plugin.layout.state.regionState, left: 'full' } } });
         }
-    }
+    };
 
     tabs: { [K in LeftPanelTabName]: JSX.Element } = {
         'none': <></>,
         'root': <>
             <SectionHeader icon={HomeOutlinedSvg} title='Home' />
             <StateObjectActions state={this.plugin.state.data} nodeRef={StateTransform.RootRef} hideHeader={true} initiallyCollapsed={true} alwaysExpandFirst={true} />
+            <CustomImportControls />
             {this.plugin.spec.components?.remoteState !== 'none' && <RemoteStateSnapshots listOnly /> }
         </>,
         'data': <>
@@ -69,7 +86,7 @@ export class LeftPanelControls extends PluginUIComponent<{}, { tab: LeftPanelTab
             <SectionHeader icon={HelpOutlineSvg} title='Help' />
             <HelpContent />
         </>
-    }
+    };
 
     render() {
         const tab = this.state.tab;
@@ -119,24 +136,32 @@ class DataIcon extends PluginUIComponent<{ set: (tab: LeftPanelTabName) => void 
 class FullSettings extends PluginUIComponent {
     private setSettings = (p: { param: PD.Base<any>, name: string, value: any }) => {
         PluginCommands.Canvas3D.SetSettings(this.plugin, { settings: { [p.name]: p.value } });
-    }
+    };
+
+    private setCanvas3DContextProps = (p: { param: PD.Base<any>, name: string, value: any }) => {
+        this.plugin.canvas3dContext?.setProps({ [p.name]: p.value });
+        this.plugin.events.canvas3d.settingsUpdated.next(void 0);
+    };
 
     componentDidMount() {
         this.subscribe(this.plugin.events.canvas3d.settingsUpdated, () => this.forceUpdate());
         this.subscribe(this.plugin.layout.events.updated, () => this.forceUpdate());
 
-        this.subscribe(this.plugin.canvas3d!.camera.stateChanged, state => {
-            if (state.radiusMax !== undefined || state.radius !== undefined) {
-                this.forceUpdate();
-            }
-        });
+        if (this.plugin.canvas3d) {
+            this.subscribe(this.plugin.canvas3d.camera.stateChanged.pipe(throttleTime(500, undefined, { leading: true, trailing: true })), state => {
+                if (state.radiusMax !== undefined || state.radius !== undefined) {
+                    this.forceUpdate();
+                }
+            });
+        }
     }
 
     render() {
         return <>
-            {this.plugin.canvas3d && <>
+            {this.plugin.canvas3d && this.plugin.canvas3dContext && <>
                 <SectionHeader title='Viewport' />
                 <ParameterControls params={Canvas3DParams} values={this.plugin.canvas3d.props} onChange={this.setSettings} />
+                <ParameterControls params={Canvas3DContext.Params} values={this.plugin.canvas3dContext.props} onChange={this.setCanvas3DContextProps} />
             </>}
             <SectionHeader title='Behavior' />
             <StateTree state={this.plugin.state.behaviors} />
@@ -158,7 +183,7 @@ class RemoveAllButton extends PluginUIComponent<{ }> {
     remove = (e: React.MouseEvent<HTMLElement>) => {
         e.preventDefault();
         PluginCommands.State.RemoveObject(this.plugin, { state: this.plugin.state.data, ref: StateTransform.RootRef });
-    }
+    };
 
     render() {
         const count = this.plugin.state.data.tree.children.get(StateTransform.RootRef).size;

@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2017-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Paul Pillot <paul.pillot@tandemai.com>
  */
 
 import { UniqueArray } from '../../../../mol-data/generic';
@@ -23,6 +24,10 @@ import { StructureProperties } from '../properties';
 import { BoundaryHelper } from '../../../../mol-math/geometry/boundary-helper';
 import { Boundary } from '../../../../mol-math/geometry/boundary';
 import { IntTuple } from '../../../../mol-data/int/tuple';
+import { Box3D, Sphere3D } from '../../../../mol-math/geometry';
+import { compile } from '../../../../mol-script/runtime/query/base';
+import { QueryContext, QueryFn, StructureSelection } from '../../query';
+import { Schema } from './schema';
 
 // avoiding namespace lookup improved performance in Chrome (Aug 2020)
 const itDiff = IntTuple.diff;
@@ -101,6 +106,26 @@ export namespace Loci {
         return Loci(structure, []);
     }
 
+    export function fromExpression(structure: Structure, expression: Expression | ((builder: typeof MS) => Expression), queryContext?: QueryContext): Loci {
+        let expr;
+        if (typeof expression === 'function') {
+            expr = expression(MS);
+        } else {
+            expr = expression;
+        }
+        const selection = compile(expr)(queryContext ?? new QueryContext(structure));
+        return StructureSelection.toLociWithSourceUnits(selection);
+    }
+
+    export function fromQuery(structure: Structure, query: QueryFn, queryContext?: QueryContext): Loci {
+        const selection = query(queryContext ?? new QueryContext(structure));
+        return StructureSelection.toLociWithSourceUnits(selection);
+    }
+
+    export function fromSchema(structure: Structure, schema: Schema, queryContext?: QueryContext): Loci {
+        return Schema.toLoci(structure, schema, queryContext);
+    }
+
     export function getFirstLocation(loci: Loci, e?: Location): Location | undefined {
         if (isEmpty(loci)) return void 0;
         const unit = loci.elements[0].unit;
@@ -141,6 +166,27 @@ export namespace Loci {
             units.push(unit.getChild(SortedArray.ofSortedArray(elements)));
         }
         return Structure.create(units, { parent: loci.structure.parent });
+    }
+
+    /**
+     * Iterates over all locations.
+     * The loc argument of the callback is mutable, use Location.clone() if you intend to keep
+     * the value around.
+     */
+    export function forEachLocation(loci: Loci, f: (loc: Location) => void, location?: Location) {
+        if (Loci.isEmpty(loci)) return;
+
+        const loc = location ? location : Location.create(loci.structure);
+        loc.structure = loci.structure;
+        for (const e of loci.elements) {
+            const { unit, indices } = e;
+            loc.unit = unit;
+            const { elements } = e.unit;
+            for (let i = 0, _i = OrderedSet.size(indices); i < _i; i++) {
+                loc.element = elements[OrderedSet.getAt(indices, i)];
+                f(loc);
+            }
+        }
     }
 
     // TODO: there should be a version that properly supports partitioned units
@@ -245,7 +291,7 @@ export namespace Loci {
 
         let isSubset = false;
         for (const e of ys.elements) {
-            if (!map.has(e.unit.id)) continue;
+            if (!map.has(e.unit.id)) return false;
             if (!OrderedSet.isSubset(map.get(e.unit.id)!, e.indices)) return false;
             else isSubset = true;
         }
@@ -497,7 +543,9 @@ export namespace Loci {
             if (!elementIndices) continue;
 
             const indices = getUnitIndices(unit.elements, elementIndices);
-            elements[elements.length] = { unit, indices };
+            if (OrderedSet.size(indices)) {
+                elements[elements.length] = { unit, indices };
+            }
         }
 
         return Loci(loci.structure, elements);
@@ -528,31 +576,35 @@ export namespace Loci {
 
     const boundaryHelper = new BoundaryHelper('98');
     const tempPosBoundary = Vec3();
-    export function getBoundary(loci: Loci, transform?: Mat4): Boundary {
+    export function getBoundary(loci: Loci, transform?: Mat4, result?: { box?: Box3D, sphere?: Sphere3D }): Boundary {
         boundaryHelper.reset();
 
         for (const e of loci.elements) {
             const { indices } = e;
-            const pos = e.unit.conformation.position, r = e.unit.conformation.r;
-            const { elements } = e.unit;
+            const { elements, conformation } = e.unit;
             for (let i = 0, _i = OrderedSet.size(indices); i < _i; i++) {
                 const eI = elements[OrderedSet.getAt(indices, i)];
-                pos(eI, tempPosBoundary);
+                conformation.position(eI, tempPosBoundary);
                 if (transform) Vec3.transformMat4(tempPosBoundary, tempPosBoundary, transform);
-                boundaryHelper.includePositionRadius(tempPosBoundary, r(eI));
+                boundaryHelper.includePositionRadius(tempPosBoundary, conformation.r(eI));
             }
         }
         boundaryHelper.finishedIncludeStep();
         for (const e of loci.elements) {
             const { indices } = e;
-            const pos = e.unit.conformation.position, r = e.unit.conformation.r;
-            const { elements } = e.unit;
+            const { elements, conformation } = e.unit;
             for (let i = 0, _i = OrderedSet.size(indices); i < _i; i++) {
                 const eI = elements[OrderedSet.getAt(indices, i)];
-                pos(eI, tempPosBoundary);
+                conformation.position(eI, tempPosBoundary);
                 if (transform) Vec3.transformMat4(tempPosBoundary, tempPosBoundary, transform);
-                boundaryHelper.radiusPositionRadius(tempPosBoundary, r(eI));
+                boundaryHelper.radiusPositionRadius(tempPosBoundary, conformation.r(eI));
             }
+        }
+
+        if (result) {
+            if (result.box) boundaryHelper.getBox(result.box);
+            if (result.sphere) boundaryHelper.getSphere(result.sphere);
+            return result as any;
         }
 
         return { box: boundaryHelper.getBox(), sphere: boundaryHelper.getSphere() };
@@ -563,12 +615,11 @@ export namespace Loci {
         let m = offset;
         for (const e of loci.elements) {
             const { indices } = e;
-            const pos = e.unit.conformation.position;
-            const { elements } = e.unit;
+            const { elements, conformation } = e.unit;
             const indexCount = OrderedSet.size(indices);
             for (let i = 0; i < indexCount; i++) {
                 const eI = elements[OrderedSet.getAt(indices, i)];
-                pos(eI, tempPos);
+                conformation.position(eI, tempPos);
                 Vec3.toArray(tempPos, positions, m + i * 3);
             }
             m += indexCount * 3;
@@ -579,6 +630,20 @@ export namespace Loci {
     export function getPrincipalAxes(loci: Loci): PrincipalAxes {
         const elementCount = size(loci);
         const positions = toPositionsArray(loci, new Float32Array(3 * elementCount));
+        return PrincipalAxes.ofPositions(positions);
+    }
+
+    export function getPrincipalAxesMany(locis: Loci[]): PrincipalAxes {
+        let elementCount = 0;
+        locis.forEach(l => {
+            elementCount += size(l);
+        });
+        const positions = new Float32Array(3 * elementCount);
+        let offset = 0;
+        locis.forEach(l => {
+            toPositionsArray(l, positions, offset);
+            offset += size(l) * 3;
+        });
         return PrincipalAxes.ofPositions(positions);
     }
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
@@ -73,13 +73,24 @@ export namespace ParamDefinition {
         return setInfo<Value<T>>({ type: 'value', defaultValue }, info);
     }
 
+    export type SelectOption<T> = readonly [
+        /** Value of the option */
+        value: T,
+        /** Human-readable label for UI */
+        label: string,
+        /** Category, to group options in UI */
+        category?: string,
+        /** More detailed description, tooltip in UI */
+        description?: string,
+    ];
+
     export interface Select<T> extends Base<T> {
         type: 'select'
-        /** array of (value, label) tuples */
-        options: readonly (readonly [T, string] | readonly [T, string, string | undefined])[]
+        /** array of (value, label, category?, description?) tuples */
+        options: readonly SelectOption<T>[]
         cycle?: boolean
     }
-    export function Select<T>(defaultValue: T, options: readonly (readonly [T, string] | readonly [T, string, string | undefined])[], info?: Info & { cycle?: boolean }): Select<T> {
+    export function Select<T>(defaultValue: T, options: readonly SelectOption<T>[], info?: Info & { cycle?: boolean }): Select<T> {
         return setInfo<Select<T>>({ type: 'select', defaultValue: checkDefaultKey(defaultValue, options), options, cycle: info?.cycle }, info);
     }
 
@@ -104,10 +115,13 @@ export namespace ParamDefinition {
     }
 
     export interface Text<T extends string = string> extends Base<T> {
-        type: 'text'
+        type: 'text',
+        multiline?: boolean,
+        placeholder?: string,
+        disableInteractiveUpdates?: boolean
     }
-    export function Text<T extends string = string>(defaultValue: string = '', info?: Info): Text<T> {
-        return setInfo<Text<T>>({ type: 'text', defaultValue: defaultValue as any }, info);
+    export function Text<T extends string = string>(defaultValue: string = '', info?: Info & { multiline?: boolean, placeholder?: string, disableInteractiveUpdates?: boolean }): Text<T> {
+        return setInfo<Text<T>>({ type: 'text', defaultValue: defaultValue as any, multiline: info?.multiline, placeholder: info?.placeholder, disableInteractiveUpdates: info?.disableInteractiveUpdates }, info);
     }
 
     export interface Color extends Base<ColorData> {
@@ -216,21 +230,26 @@ export namespace ParamDefinition {
     }
 
     export interface LineGraph extends Base<Vec2Data[]> {
-        type: 'line-graph'
+        type: 'line-graph',
+        getVolume?: () => unknown
     }
-    export function LineGraph(defaultValue: Vec2Data[], info?: Info): LineGraph {
-        return setInfo<LineGraph>({ type: 'line-graph', defaultValue }, info);
+    export function LineGraph(defaultValue: Vec2Data[], info?: Info & { getVolume?: (binCount?: number) => unknown }): LineGraph {
+        const ret = setInfo<LineGraph>({ type: 'line-graph', defaultValue }, info);
+        if (info?.getVolume) ret.getVolume = info.getVolume;
+        return ret;
     }
 
     export interface Group<T> extends Base<T> {
         type: 'group',
         params: Params,
+        presets?: Select<T>['options'],
         isExpanded?: boolean,
         isFlat?: boolean,
         pivot?: keyof T
     }
-    export function Group<T>(params: For<T>, info?: Info & { isExpanded?: boolean, isFlat?: boolean, customDefault?: any, pivot?: keyof T }): Group<Normalize<T>> {
+    export function Group<T>(params: For<T>, info?: Info & { isExpanded?: boolean, isFlat?: boolean, customDefault?: any, pivot?: keyof T, presets?: Select<T>['options'] }): Group<Normalize<T>> {
         const ret = setInfo<Group<Normalize<T>>>({ type: 'group', defaultValue: info?.customDefault || getDefaultValues(params as any as Params) as any, params: params as any as Params }, info);
+        if (info?.presets) ret.presets = info.presets;
         if (info?.isExpanded) ret.isExpanded = info.isExpanded;
         if (info?.isFlat) ret.isFlat = info.isFlat;
         if (info?.pivot) ret.pivot = info.pivot as any;
@@ -288,9 +307,9 @@ export namespace ParamDefinition {
     // getValue needs to be assigned by a runtime because it might not be serializable
     export interface ValueRef<T = any> extends Base<{ ref: string, getValue: () => T }> {
         type: 'value-ref',
-        resolveRef: (ref: string) => T,
+        resolveRef: (ref: string, getData: (ref: string) => any) => T,
         // a provider because the list changes over time
-        getOptions: () => Select<string>['options'],
+        getOptions: (ctx: any) => Select<string>['options'],
     }
     export function ValueRef<T>(getOptions: ValueRef['getOptions'], resolveRef: ValueRef<T>['resolveRef'], info?: Info & { defaultRef?: string }) {
         return setInfo<ValueRef<T>>({ type: 'value-ref', defaultValue: { ref: info?.defaultRef ?? '', getValue: unsetGetValue as any }, getOptions, resolveRef }, info);
@@ -312,7 +331,7 @@ export namespace ParamDefinition {
         toValue(v: C): T
     }
     export function Converted<T, C extends Any>(fromValue: (v: T) => C['defaultValue'], toValue: (v: C['defaultValue']) => T, converted: C): Converted<T, C['defaultValue']> {
-        return { type: 'converted', defaultValue: toValue(converted.defaultValue), converted, fromValue, toValue };
+        return setInfo({ type: 'converted', defaultValue: toValue(converted.defaultValue), converted, fromValue, toValue }, converted);
     }
 
     export interface Conditioned<T, P extends Base<T>, C = { [k: string]: P }> extends Base<T> {
@@ -322,7 +341,7 @@ export namespace ParamDefinition {
         conditionForValue(v: T): keyof C
         conditionedValue(v: T, condition: keyof C): T,
     }
-    export function Conditioned<T, P extends Base<T>, C = { [k: string]: P }>(defaultValue: T, conditionParams: C, conditionForValue: (v: T) => keyof C, conditionedValue: (v: T, condition: keyof C) => T, info?: Info): Conditioned<T, P, C> {
+    export function Conditioned<T, P extends Base<T>, C extends {} = { [k: string]: P }>(defaultValue: T, conditionParams: C, conditionForValue: (v: T) => keyof C, conditionedValue: (v: T, condition: keyof C) => T, info?: Info): Conditioned<T, P, C> {
         const options = Object.keys(conditionParams).map(k => [k, k]) as [string, string][];
         return setInfo({ type: 'conditioned', select: Select<string>(conditionForValue(defaultValue) as string, options, info), defaultValue, conditionParams, conditionForValue, conditionedValue }, info);
     }
@@ -339,7 +358,7 @@ export namespace ParamDefinition {
         | ColorList | Group<any> | Mapped<any> | Converted<any, any> | Conditioned<any, any, any> | Script | ObjectList | ValueRef | DataRef
 
     export type Params = { [k: string]: Any }
-    export type Values<T extends Params> = { [k in keyof T]: T[k]['defaultValue'] }
+    export type Values<T extends Params = Params> = { [k in keyof T]: T[k]['defaultValue'] }
     /** This is required for params with optional values */
     export type ValuesFor<T extends For<any>> = Normalize<{ [k in keyof T]: T[k]['defaultValue'] }>
 
@@ -363,8 +382,8 @@ export namespace ParamDefinition {
         return d as Values<T>;
     }
 
-    function _resolveRef(resolve: (ref: string) => any, ref: string) {
-        return () => resolve(ref);
+    function _resolveRef(resolve: (ref: string, getData: (ref: string) => any) => any, ref: string, getData: (ref: string) => any) {
+        return () => resolve(ref, getData);
     }
 
     function resolveRefValue(p: Any, value: any, getData: (ref: string) => any) {
@@ -373,11 +392,11 @@ export namespace ParamDefinition {
         if (p.type === 'value-ref') {
             const v = value as ValueRef['defaultValue'];
             if (!v.ref) v.getValue = () => { throw new Error('Unset ref in ValueRef value.'); };
-            else v.getValue = _resolveRef(p.resolveRef, v.ref);
+            else v.getValue = _resolveRef(p.resolveRef, v.ref, getData);
         } else if (p.type === 'data-ref') {
             const v = value as ValueRef['defaultValue'];
             if (!v.ref) v.getValue = () => { throw new Error('Unset ref in ValueRef value.'); };
-            else v.getValue = _resolveRef(getData, v.ref);
+            else v.getValue = _resolveRef(getData, v.ref, getData);
         } else if (p.type === 'group') {
             resolveRefs(p.params, value, getData);
         } else if (p.type === 'mapped') {
@@ -515,7 +534,7 @@ export namespace ParamDefinition {
         if (a === undefined) return { ...b };
         if (b === undefined) return { ...a };
 
-        const o = Object.create(null);
+        const o = {} as any;
         for (const k of Object.keys(params)) {
             o[k] = mergeParam(params[k], a[k], b[k]);
         }
@@ -568,7 +587,7 @@ export namespace ParamDefinition {
         if (p.type === 'value') {
             return value;
         } else if (p.type === 'group') {
-            const ret = Object.create(null);
+            const ret = {} as any;
             for (const key of Object.keys(p.params)) {
                 const param = p.params[key];
                 if (value[key] === void 0) {
@@ -619,7 +638,7 @@ export namespace ParamDefinition {
             return defaultIfUndefined ? getDefaultValues(p) : value;
         }
 
-        const ret = Object.create(null);
+        const ret = {} as any;
         for (const key of Object.keys(p)) {
             const param = p[key];
             if (value[key] === void 0) {
@@ -672,10 +691,20 @@ export namespace ParamDefinition {
         return '';
     }
 
-    function checkDefaultKey<T>(k: T, options: readonly (readonly [T, string] | readonly [T, string, string | undefined])[]) {
+    function checkDefaultKey<T>(k: T, options: readonly SelectOption<T>[]) {
         for (const o of options) {
             if (o[0] === k) return k;
         }
         return options.length > 0 ? options[0][0] : void 0 as any as T;
+    }
+
+    export function withDefaults<T extends Params>(schema: T, updates: Partial<ValuesFor<T>>): T {
+        const next: any = {};
+        for (const k of Object.keys(updates)) {
+            const v = (updates as any)[k];
+            if (!schema[k] || v === null || v === undefined || schema[k].defaultValue === v) continue;
+            next[k] = { ...schema[k], defaultValue: v };
+        }
+        return { ...schema, ...next };
     }
 }

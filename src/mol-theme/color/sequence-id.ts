@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -8,15 +8,16 @@ import { Unit, StructureElement, Bond, ElementIndex } from '../../mol-model/stru
 
 import { ColorScale, Color } from '../../mol-util/color';
 import { Location } from '../../mol-model/location';
-import { ColorTheme } from '../color';
+import type { ColorTheme } from '../color';
 import { ParamDefinition as PD } from '../../mol-util/param-definition';
 import { ThemeDataContext } from '../../mol-theme/theme';
+import { ColorThemeCategory } from './categories';
 
 const DefaultColor = Color(0xCCCCCC);
 const Description = 'Gives every polymer residue a color based on its `seq_id` value.';
 
 export const SequenceIdColorThemeParams = {
-    list: PD.ColorList('turbo', { presetKind: 'scale' }),
+    list: PD.ColorList('turbo-no-black', { presetKind: 'scale' }),
 };
 export type SequenceIdColorThemeParams = typeof SequenceIdColorThemeParams
 export function getSequenceIdColorThemeParams(ctx: ThemeDataContext) {
@@ -113,7 +114,7 @@ export function SequenceIdColorTheme(ctx: ThemeDataContext, props: PD.Values<Seq
 export const SequenceIdColorThemeProvider: ColorTheme.Provider<SequenceIdColorThemeParams, 'sequence-id'> = {
     name: 'sequence-id',
     label: 'Sequence Id',
-    category: ColorTheme.Category.Residue,
+    category: ColorThemeCategory.Residue,
     factory: SequenceIdColorTheme,
     getParams: getSequenceIdColorThemeParams,
     defaultValues: PD.getDefaultValues(SequenceIdColorThemeParams),

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -10,8 +10,10 @@ import { Viewport, cameraProject, cameraUnproject } from './camera/util';
 import { CameraTransitionManager } from './camera/transition';
 import { BehaviorSubject } from 'rxjs';
 import { Scene } from '../mol-gl/scene';
+import { assertUnreachable } from '../mol-util/type-helpers';
+import { Ray3D } from '../mol-math/geometry/primitives/ray3d';
 
-export { ICamera, Camera };
+export type { ICamera };
 
 interface ICamera {
     readonly viewport: Viewport,
@@ -25,33 +27,27 @@ interface ICamera {
     readonly near: number,
     readonly fogFar: number,
     readonly fogNear: number,
+    readonly headRotation: Mat4,
 }
 
-const tmpPos1 = Vec3();
-const tmpPos2 = Vec3();
 const tmpClip = Vec4();
 
-class Camera implements ICamera {
+export class Camera implements ICamera {
     readonly view: Mat4 = Mat4.identity();
     readonly projection: Mat4 = Mat4.identity();
     readonly projectionView: Mat4 = Mat4.identity();
     readonly inverseProjectionView: Mat4 = Mat4.identity();
-
-    private pixelScale: number
-    get pixelRatio() {
-        const dpr = (typeof window !== 'undefined') ? window.devicePixelRatio : 1;
-        return dpr * this.pixelScale;
-    }
+    readonly headRotation: Mat4 = Mat4.zero();
 
     readonly viewport: Viewport;
     readonly state: Readonly<Camera.Snapshot> = Camera.createDefaultSnapshot();
     readonly viewOffset = Camera.ViewOffset();
 
-    near = 1
-    far = 10000
-    fogNear = 5000
-    fogFar = 10000
-    zoom = 1
+    near = 1;
+    far = 10000;
+    fogNear = 5000;
+    fogFar = 10000;
+    zoom = 1;
 
     readonly transition: CameraTransitionManager = new CameraTransitionManager(this);
     readonly stateChanged = new BehaviorSubject<Partial<Camera.Snapshot>>(this.state);
@@ -76,7 +72,7 @@ class Camera implements ICamera {
             return false;
         }
 
-        const height = 2 * Math.tan(snapshot.fov / 2) * Vec3.distance(snapshot.position, snapshot.target);
+        const height = 2 * Math.tan(snapshot.fov / 2) * Vec3.distance(snapshot.position, snapshot.target) * this.state.scale;
         this.zoom = this.viewport.height / height;
 
         updateClip(this);
@@ -84,7 +80,7 @@ class Camera implements ICamera {
         switch (this.state.mode) {
             case 'orthographic': updateOrtho(this); break;
             case 'perspective': updatePers(this); break;
-            default: throw new Error('unknown camera mode');
+            default: assertUnreachable(this.state.mode);
         }
 
         const changed = !Mat4.areEqual(this.projection, this.prevProjection, EPSILON) || !Mat4.areEqual(this.view, this.prevView, EPSILON);
@@ -115,14 +111,14 @@ class Camera implements ICamera {
     }
 
     getTargetDistance(radius: number) {
-        return Camera.targetDistance(radius, this.state.fov, this.viewport.width, this.viewport.height);
+        return Camera.targetDistance(radius, this.state.mode, this.state.fov, this.viewport.width, this.viewport.height);
     }
 
-    getFocus(target: Vec3, radius: number, up?: Vec3, dir?: Vec3): Partial<Camera.Snapshot> {
+    getFocus(target: Vec3, radius: number, up?: Vec3, dir?: Vec3, snapshot?: Partial<Camera.Snapshot>): Partial<Camera.Snapshot> {
         const r = Math.max(radius, 0.01);
         const targetDistance = this.getTargetDistance(r);
 
-        Vec3.sub(this.deltaDirection, this.target, this.position);
+        Vec3.sub(this.deltaDirection, snapshot?.target ?? this.target, snapshot?.position ?? this.position);
         if (dir) Vec3.matchDirection(this.deltaDirection, dir, this.deltaDirection);
         Vec3.setMagnitude(this.deltaDirection, this.deltaDirection, targetDistance);
         Vec3.sub(this.newPosition, target, this.deltaDirection);
@@ -132,6 +128,18 @@ class Camera implements ICamera {
         state.radius = r;
         state.position = Vec3.clone(this.newPosition);
         if (up) Vec3.matchDirection(state.up, up, state.up);
+
+        return state;
+    }
+
+    getCenter(target: Vec3, radius?: number): Partial<Camera.Snapshot> {
+        Vec3.sub(this.deltaDirection, this.target, this.position);
+        Vec3.sub(this.newPosition, target, this.deltaDirection);
+
+        const state = Camera.copySnapshot(Camera.createDefaultSnapshot(), this.state);
+        state.target = Vec3.clone(target);
+        state.position = Vec3.clone(this.newPosition);
+        if (radius) state.radius = Math.max(radius, 0.01);
 
         return state;
     }
@@ -159,6 +167,10 @@ class Camera implements ICamera {
         }
     }
 
+    center(target: Vec3, durationMs?: number) {
+        this.setState(this.getCenter(target), durationMs);
+    }
+
     /** Transform point into 2D window coordinates. */
     project(out: Vec4, point: Vec3) {
         return cameraProject(out, point, this.viewport, this.projectionView);
@@ -175,24 +187,36 @@ class Camera implements ICamera {
 
     /** World space pixel size at given `point` */
     getPixelSize(point: Vec3) {
-        // project -> unproject of `point` does not exactly return the same
-        // to get a sufficiently accurate measure we unproject the original
-        // clip position in addition to the one shifted bey one pixel
         this.project(tmpClip, point);
-        this.unproject(tmpPos1, tmpClip);
-        tmpClip[0] += 1;
-        this.unproject(tmpPos2, tmpClip);
-        return Vec3.distance(tmpPos1, tmpPos2);
+        const w = tmpClip[3];
+        const rx = this.viewport.width;
+        const P00 = this.projection[0];
+        return (2 / w) / (rx * Math.abs(P00));
     }
 
-    constructor(state?: Partial<Camera.Snapshot>, viewport = Viewport.create(0, 0, 128, 128), props: Partial<{ pixelScale: number }> = {}) {
+    getRay(out: Ray3D, x: number, y: number) {
+        if (this.state.mode === 'orthographic') {
+            Vec3.set(out.origin, x, y, 0);
+            this.unproject(out.origin, out.origin);
+            Vec3.normalize(out.direction, Vec3.sub(out.direction, this.target, this.position));
+            Vec3.scaleAndAdd(out.origin, out.origin, out.direction, -this.near);
+        } else {
+            Vec3.copy(out.origin, this.state.position);
+            Vec3.scale(out.origin, out.origin, this.state.scale);
+            Vec3.set(out.direction, x, y, 0.5);
+            this.unproject(out.direction, out.direction);
+            Vec3.normalize(out.direction, Vec3.sub(out.direction, out.direction, out.origin));
+        }
+        return out;
+    }
+
+    constructor(state?: Partial<Camera.Snapshot>, viewport = Viewport.create(0, 0, 128, 128)) {
         this.viewport = viewport;
-        this.pixelScale = props.pixelScale || 1;
         Camera.copySnapshot(this.state, state);
     }
 }
 
-namespace Camera {
+export namespace Camera {
     export type Mode = 'perspective' | 'orthographic'
 
     export type SnapshotProvider = Partial<Snapshot> | ((scene: Scene, camera: Camera) => Partial<Snapshot>)
@@ -240,11 +264,14 @@ namespace Camera {
         out.height = view.height;
     }
 
-    export function targetDistance(radius: number, fov: number, width: number, height: number) {
+    export function targetDistance(radius: number, mode: Mode, fov: number, width: number, height: number) {
         const r = Math.max(radius, 0.01);
         const aspect = width / height;
         const aspectFactor = (height < width ? 1 : aspect);
-        return Math.abs((r / aspectFactor) / Math.sin(fov / 2));
+        if (mode === 'orthographic')
+            return Math.abs((r / aspectFactor) / Math.tan(fov / 2));
+        else
+            return Math.abs((r / aspectFactor) / Math.sin(fov / 2));
     }
 
     export function createDefaultSnapshot(): Snapshot {
@@ -259,7 +286,11 @@ namespace Camera {
             radius: 0,
             radiusMax: 10,
             fog: 50,
-            clipFar: true
+            clipFar: true,
+            minNear: 5,
+            minFar: 0,
+
+            scale: 1,
         };
     }
 
@@ -275,6 +306,10 @@ namespace Camera {
         radiusMax: number
         fog: number
         clipFar: boolean
+        minNear: number
+        minFar: number
+
+        scale: number
     }
 
     export function copySnapshot(out: Snapshot, source?: Partial<Snapshot>) {
@@ -291,6 +326,10 @@ namespace Camera {
         if (typeof source.radiusMax !== 'undefined') out.radiusMax = source.radiusMax;
         if (typeof source.fog !== 'undefined') out.fog = source.fog;
         if (typeof source.clipFar !== 'undefined') out.clipFar = source.clipFar;
+        if (typeof source.minNear !== 'undefined') out.minNear = source.minNear;
+        if (typeof source.minFar !== 'undefined') out.minFar = source.minFar;
+
+        if (typeof source.scale !== 'undefined') out.scale = source.scale;
 
         return out;
     }
@@ -302,9 +341,25 @@ namespace Camera {
             && a.radiusMax === b.radiusMax
             && a.fog === b.fog
             && a.clipFar === b.clipFar
+            && a.minNear === b.minNear
+            && a.minFar === b.minFar
+            && a.scale === b.scale
             && Vec3.exactEquals(a.position, b.position)
             && Vec3.exactEquals(a.up, b.up)
             && Vec3.exactEquals(a.target, b.target);
+    }
+}
+
+const tmpPosition = Vec3();
+const tmpTarget = Vec3();
+
+function updateView(camera: Camera) {
+    if (camera.state.scale === 1) {
+        Mat4.lookAt(camera.view, camera.state.position, camera.state.target, camera.state.up);
+    } else {
+        Vec3.scale(tmpPosition, camera.state.position, camera.state.scale);
+        Vec3.scale(tmpTarget, camera.state.target, camera.state.scale);
+        Mat4.lookAt(camera.view, tmpPosition, tmpTarget, camera.state.up);
     }
 }
 
@@ -341,7 +396,7 @@ function updateOrtho(camera: Camera) {
     Mat4.ortho(camera.projection, left, right, top, bottom, near, far);
 
     // build view matrix
-    Mat4.lookAt(camera.view, camera.position, camera.target, camera.up);
+    updateView(camera);
 }
 
 function updatePers(camera: Camera) {
@@ -365,39 +420,47 @@ function updatePers(camera: Camera) {
     Mat4.perspective(camera.projection, left, left + width, top, top - height, near, far);
 
     // build view matrix
-    Mat4.lookAt(camera.view, camera.position, camera.target, camera.up);
+    updateView(camera);
 }
 
 function updateClip(camera: Camera) {
-    let { radius, radiusMax, mode, fog, clipFar } = camera.state;
-    if (radius < 0.01) radius = 0.01;
+    let { radius, radiusMax, mode, fog, clipFar, minNear, minFar, scale } = camera.state;
+    radiusMax *= scale;
+    minFar *= scale;
+    minNear *= scale;
+    radius *= scale;
 
-    const normalizedFar = clipFar ? radius : radiusMax;
-    const cameraDistance = Vec3.distance(camera.position, camera.target);
+    const minRadius = 0.01 * scale;
+    if (radius < minRadius) radius = minRadius;
+
+    const normalizedFar = Math.max(clipFar ? radius : radiusMax, minFar);
+    Vec3.scale(tmpTarget, camera.state.target, scale);
+    Vec3.scale(tmpPosition, camera.state.position, scale);
+    const cameraDistance = Vec3.distance(tmpPosition, tmpTarget);
     let near = cameraDistance - radius;
     let far = cameraDistance + normalizedFar;
+
+    if (mode === 'perspective') {
+        // set at least to 5 to avoid slow sphere impostor rendering
+        near = Math.max(Math.min(radiusMax, minNear), near);
+        far = Math.max(minNear, far);
+    } else {
+        // not too close to 0 as it causes issues with outline rendering
+        near = Math.max(Math.min(radiusMax, minNear), near);
+        far = Math.max(minNear, far);
+    }
+
+    if (near === far) {
+        // make sure near and far are not identical to avoid Infinity in the projection matrix
+        far = near + 0.01 * scale;
+    }
 
     const fogNearFactor = -(50 - fog) / 50;
     const fogNear = cameraDistance - (normalizedFar * fogNearFactor);
     const fogFar = far;
 
-    if (mode === 'perspective') {
-        // set at least to 5 to avoid slow sphere impostor rendering
-        near = Math.max(Math.min(radiusMax, 5), near);
-        far = Math.max(5, far);
-    } else {
-        // not too close to 0 as it causes issues with outline rendering
-        near = Math.max(Math.min(radiusMax, 5), near);
-        far = Math.max(5, far);
-    }
-
-    if (near === far) {
-        // make sure near and far are not identical to avoid Infinity in the projection matrix
-        far = near + 0.01;
-    }
-
     camera.near = near;
-    camera.far = 2 * far; // avoid precision issues distingushing far objects from background
+    camera.far = far;
     camera.fogNear = fogNear;
     camera.fogFar = fogFar;
 }

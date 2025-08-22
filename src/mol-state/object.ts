@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  */
@@ -35,7 +35,7 @@ namespace StateObject {
     export function create<Data, T extends Type>(type: T) {
         return class O implements StateObject<Data, T> {
             static type = type;
-            static is(obj?: StateObject): obj is O { return !!obj && type === obj.type; }
+            static is(obj?: StateObject): obj is StateObject<Data, T> { return !!obj && type === obj.type; }
             id = UUID.create22();
             type = type;
             label: string;
@@ -79,8 +79,6 @@ interface StateObjectCell<T extends StateObject = StateObject, F extends StateTr
         definition: ParamDefinition.Params,
         values: any
     } | undefined,
-
-    paramsNormalizedVersion: string,
 
     dependencies: {
         dependentBy: StateObjectCell[],

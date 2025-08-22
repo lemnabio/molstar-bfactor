@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2019 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -19,6 +19,7 @@
 
 import { NumberArray } from '../../../mol-util/type-helpers';
 import { EPSILON } from './common';
+import { Euler } from './euler';
 import { Mat4 } from './mat4';
 import { Vec3 } from './vec3';
 
@@ -64,7 +65,7 @@ namespace Mat3 {
         return mat;
     }
 
-    export function toArray(a: Mat3, out: NumberArray, offset: number) {
+    export function toArray<T extends NumberArray>(a: Mat3, out: T, offset: number) {
         out[offset + 0] = a[0];
         out[offset + 1] = a[1];
         out[offset + 2] = a[2];
@@ -90,6 +91,19 @@ namespace Mat3 {
         return a;
     }
 
+    export function fromColumns(out: Mat3, left: Vec3, middle: Vec3, right: Vec3) {
+        out[0] = left[0];
+        out[1] = left[1];
+        out[2] = left[2];
+        out[3] = middle[0];
+        out[4] = middle[1];
+        out[5] = middle[2];
+        out[6] = right[0];
+        out[7] = right[1];
+        out[8] = right[2];
+        return out;
+    }
+
     /**
      * Copies the upper-left 3x3 values into the given mat3.
      */
@@ -104,6 +118,17 @@ namespace Mat3 {
         out[7] = a[9];
         out[8] = a[10];
         return out;
+    }
+
+    const _m4 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] as unknown as Mat4;
+    export function fromEuler(out: Mat3, euler: Euler, order: Euler.Order) {
+        Mat4.fromEuler(_m4, euler, order);
+        return fromMat4(out, _m4);
+    }
+
+    export function fromRotation(out: Mat3, rad: number, axis: Vec3) {
+        Mat4.fromRotation(_m4, rad, axis);
+        return fromMat4(out, _m4);
     }
 
     export function create(a00: number, a01: number, a02: number, a10: number, a11: number, a12: number, a20: number, a21: number, a22: number): Mat3 {
@@ -407,12 +432,12 @@ namespace Mat3 {
         return out;
     }
 
-    const tmpR0 = [0.1, 0.0, 0.0] as Vec3;
-    const tmpR1 = [0.1, 0.0, 0.0] as Vec3;
-    const tmpR2 = [0.1, 0.0, 0.0] as Vec3;
-    const tmpR0xR1 = [0.1, 0.0, 0.0] as Vec3;
-    const tmpR0xR2 = [0.1, 0.0, 0.0] as Vec3;
-    const tmpR1xR2 = [0.1, 0.0, 0.0] as Vec3;
+    const tmpR0 = [0.1, 0.0, 0.0] as unknown as Vec3;
+    const tmpR1 = [0.1, 0.0, 0.0] as unknown as Vec3;
+    const tmpR2 = [0.1, 0.0, 0.0] as unknown as Vec3;
+    const tmpR0xR1 = [0.1, 0.0, 0.0] as unknown as Vec3;
+    const tmpR0xR2 = [0.1, 0.0, 0.0] as unknown as Vec3;
+    const tmpR1xR2 = [0.1, 0.0, 0.0] as unknown as Vec3;
     /**
      * Calculates the eigenvector for the given eigenvalue `e` of matrix `a`
      */
@@ -454,6 +479,38 @@ namespace Mat3 {
     }
 
     export const Identity: ReadonlyMat3 = identity();
+
+    /** Return the Frobenius inner product of two matrices (= dot product of the flattened matrices).
+     * Can be used as a measure of similarity between two rotation matrices. */
+    export function innerProduct(a: Mat3, b: Mat3) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+            + a[3] * b[3] + a[4] * b[4] + a[5] * b[5]
+            + a[6] * b[6] + a[7] * b[7] + a[8] * b[8];
+    }
+
+    /**
+     * Computes the adjugate (classical adjoint) of the upper-left 3×3 portion of a 4×4 matrix. */
+    export function adjointFromMat4(out: Mat3, m: Mat4): Mat3 {
+        const ax = m[0];
+        const ay = m[1];
+        const az = m[2];
+        const bx = m[4];
+        const by = m[5];
+        const bz = m[6];
+        const cx = m[8];
+        const cy = m[9];
+        const cz = m[10];
+        out[0] = by * cz - bz * cy;
+        out[1] = bz * cx - bx * cz;
+        out[2] = bx * cy - by * cx;
+        out[3] = cy * az - cz * ay;
+        out[4] = cz * ax - cx * az;
+        out[5] = cx * ay - cy * ax;
+        out[6] = ay * bz - az * by;
+        out[7] = az * bx - ax * bz;
+        out[8] = ax * by - ay * bx;
+        return out;
+    }
 }
 
 export { Mat3 };

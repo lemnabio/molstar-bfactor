@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -24,6 +24,10 @@ import { CubeFile } from '../mol-io/reader/cube/parser';
 import { DxFile } from '../mol-io/reader/dx/parser';
 import { Color } from '../mol-util/color/color';
 import { Asset } from '../mol-util/assets';
+import { PrmtopFile } from '../mol-io/reader/prmtop/parser';
+import { TopFile } from '../mol-io/reader/top/parser';
+import { StringLike } from '../mol-io/common/string-like';
+
 
 export type TypeClass = 'root' | 'data' | 'prop'
 
@@ -56,7 +60,7 @@ export namespace PluginStateObject {
     export class Group extends Create({ name: 'Group', typeClass: 'Group' }) { }
 
     export namespace Data {
-        export class String extends Create<string>({ name: 'String Data', typeClass: 'Data', }) { }
+        export class String extends Create<StringLike>({ name: 'String Data', typeClass: 'Data', }) { }
         export class Binary extends Create<Uint8Array>({ name: 'Binary Data', typeClass: 'Data' }) { }
 
         export type BlobEntry = { id: string } & (
@@ -72,6 +76,8 @@ export namespace PluginStateObject {
         export class Cif extends Create<CifFile>({ name: 'CIF File', typeClass: 'Data' }) { }
         export class Cube extends Create<CubeFile>({ name: 'Cube File', typeClass: 'Data' }) { }
         export class Psf extends Create<PsfFile>({ name: 'PSF File', typeClass: 'Data' }) { }
+        export class Prmtop extends Create<PrmtopFile>({ name: 'PRMTOP File', typeClass: 'Data' }) { }
+        export class Top extends Create<TopFile>({ name: 'TOP File', typeClass: 'Data' }) { }
         export class Ply extends Create<PlyFile>({ name: 'PLY File', typeClass: 'Data' }) { }
         export class Ccp4 extends Create<Ccp4File>({ name: 'CCP4/MRC/MAP File', typeClass: 'Data' }) { }
         export class Dsn6 extends Create<Dsn6File>({ name: 'DSN6/BRIX File', typeClass: 'Data' }) { }
@@ -115,8 +121,8 @@ export namespace PluginStateObject {
             }
             export class Representation3DState extends Create<Representation3DStateData>({ name: 'Structure 3D State', typeClass: 'Object' }) { }
 
-            export interface SelectionEntry { key: string, groupId?: string, loci: StructureElement.Loci }
-            export class Selections extends Create<ReadonlyArray<SelectionEntry>>({ name: 'Selections', typeClass: 'Object' }) {}
+            export interface SelectionEntry { key: string, structureRef: string, groupId?: string, loci: StructureElement.Loci }
+            export class Selections extends Create<ReadonlyArray<SelectionEntry>>({ name: 'Selections', typeClass: 'Object' }) { }
         }
     }
 

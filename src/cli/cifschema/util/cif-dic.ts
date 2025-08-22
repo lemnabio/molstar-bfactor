@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2018 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2022 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -13,15 +13,18 @@ export function getFieldType(type: string, description: string, values?: string[
     switch (type) {
         // mmCIF
         case 'code':
-        case 'ucode':
         case 'line':
-        case 'uline':
         case 'text':
         case 'char':
-        case 'uchar3':
-        case 'uchar1':
         case 'boolean':
             return values && values.length ? EnumCol(values, 'str', description) : StrCol(description);
+        case 'ucode':
+        case 'uline':
+        case 'uchar3':
+        case 'uchar1':
+        case 'uchar5':
+            // only force lower-case for enums
+            return values && values.length ? EnumCol(values.map(x => x.toLowerCase()), 'lstr', description) : StrCol(description);
         case 'aliasname':
         case 'name':
         case 'idname':
@@ -38,6 +41,7 @@ export function getFieldType(type: string, description: string, values?: string[
         case 'pdbx_related_db_id':
         case 'sequence_dep':
         case 'pdb_id':
+        case 'pdb_id_u': // should be case insensitve, but can't express that
         case 'emd_id':
         // todo, consider adding specialised fields
         case 'yyyy-mm-dd':
@@ -49,6 +53,7 @@ export function getFieldType(type: string, description: string, values?: string[
         case 'operation_expression':
         case 'point_symmetry':
         case '4x3_matrix':
+        case '3x4_matrix':
         case '3x4_matrices':
         case 'point_group':
         case 'point_group_helical':
@@ -58,6 +63,7 @@ export function getFieldType(type: string, description: string, values?: string[
         case 'symop':
         case 'exp_data_doi':
         case 'asym_id':
+        case 'uniprot_ptm_id':
             return StrCol(description);
         case 'int':
         case 'non_negative_int':
@@ -68,6 +74,7 @@ export function getFieldType(type: string, description: string, values?: string[
         case 'ec-type':
         case 'ucode-alphanum-csv':
         case 'id_list':
+        case 'entity_id_list':
             return ListCol('str', ',', description);
         case 'id_list_spc':
             return ListCol('str', ' ', description);
@@ -84,6 +91,8 @@ export function getFieldType(type: string, description: string, values?: string[
         case 'DateTime':
         case 'Tag':
         case 'Implied':
+        case 'Word':
+        case 'Uri':
             return wrapContainer('str', ',', description, container);
         case 'Real':
             return wrapContainer('float', ',', description, container);
@@ -147,7 +156,7 @@ function getImportFrames(d: Data.CifFrame, imports: Imports) {
 }
 
 /** get field from given or linked category */
-function getField(category: string, field: string, d: Data.CifFrame, imports: Imports, ctx: FrameData): Data.CifField|undefined {
+function getField(category: string, field: string, d: Data.CifFrame, imports: Imports, ctx: FrameData): Data.CifField | undefined {
     const { categories, links } = ctx;
     const cat = d.categories[category];
     if (cat) {
@@ -225,13 +234,19 @@ const FORCE_INT_FIELDS = [
     '_atom_site.id',
     '_atom_site.auth_seq_id',
     '_atom_site_anisotrop.id',
+    '_atom_site_anisotrop.pdbx_auth_seq_id',
     '_pdbx_struct_mod_residue.auth_seq_id',
+    '_pdbx_unobs_or_zero_occ_residues.auth_seq_id',
     '_struct_conf.beg_auth_seq_id',
     '_struct_conf.end_auth_seq_id',
     '_struct_conn.ptnr1_auth_seq_id',
     '_struct_conn.ptnr2_auth_seq_id',
     '_struct_sheet_range.beg_auth_seq_id',
     '_struct_sheet_range.end_auth_seq_id',
+    '_struct_site.pdbx_auth_seq_id',
+    '_struct_site_gen.auth_seq_id',
+    '_struct_mon_prot_cis.auth_seq_id',
+    '_struct_mon_prot_cis.pdbx_auth_seq_id_2',
 ];
 
 /**

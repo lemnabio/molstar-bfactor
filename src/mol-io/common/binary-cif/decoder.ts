@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * From CIFTools.js
  * @author David Sehnal <david.sehnal@gmail.com>
@@ -7,6 +7,7 @@
 
 import { Encoding, EncodedData } from './encoding';
 import { IsNativeEndianLittle, flipByteOrder } from '../binary';
+import { assertUnreachable } from '../../../mol-util/type-helpers';
 
 /**
  * Fixed point, delta, RLE, integer packing adopted from https://github.com/rcsb/mmtf-javascript/
@@ -33,7 +34,7 @@ function decodeStep(data: any, encoding: Encoding): any {
                 case Encoding.IntDataType.Uint32: return uint32(data);
                 case Encoding.FloatDataType.Float32: return float32(data);
                 case Encoding.FloatDataType.Float64: return float64(data);
-                default: throw new Error('Unsupported ByteArray type.');
+                default: assertUnreachable(encoding.type);
             }
         }
         case 'FixedPoint': return fixedPoint(data, encoding);
@@ -53,7 +54,7 @@ function getIntArray(type: Encoding.IntDataType, size: number) {
         case Encoding.IntDataType.Uint8: return new Uint8Array(size);
         case Encoding.IntDataType.Uint16: return new Uint16Array(size);
         case Encoding.IntDataType.Uint32: return new Uint32Array(size);
-        default: throw new Error('Unsupported integer data type.');
+        default: return new Int32Array(size);
     }
 }
 
@@ -61,7 +62,7 @@ function getFloatArray(type: Encoding.FloatDataType, size: number) {
     switch (type) {
         case Encoding.FloatDataType.Float32: return new Float32Array(size);
         case Encoding.FloatDataType.Float64: return new Float64Array(size);
-        default: throw new Error('Unsupported floating data type.');
+        default: return new Float64Array(size);
     }
 }
 
@@ -146,7 +147,7 @@ function integerPackingSigned(data: (Int8Array | Int16Array), encoding: Encoding
     return output;
 }
 
-function integerPackingUnsigned(data: (Int8Array | Int16Array), encoding: Encoding.IntegerPacking) {
+function integerPackingUnsigned(data: (Uint8Array | Uint16Array), encoding: Encoding.IntegerPacking) {
     const upperLimit = encoding.byteCount === 1 ? 0xFF : 0xFFFF;
     const n = data.length;
     const output = new Int32Array(encoding.srcSize);
@@ -167,9 +168,9 @@ function integerPackingUnsigned(data: (Int8Array | Int16Array), encoding: Encodi
     return output;
 }
 
-function integerPacking(data: (Int8Array | Int16Array), encoding: Encoding.IntegerPacking) {
+function integerPacking(data: (Int8Array | Int16Array | Uint8Array | Uint16Array), encoding: Encoding.IntegerPacking) {
     if (data.length === encoding.srcSize) return data;
-    return encoding.isUnsigned ? integerPackingUnsigned(data, encoding) : integerPackingSigned(data, encoding);
+    return encoding.isUnsigned ? integerPackingUnsigned(data as any, encoding) : integerPackingSigned(data as any, encoding);
 }
 
 function stringArray(data: Uint8Array, encoding: Encoding.StringArray) {

@@ -1,12 +1,13 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Yakov Pechersky <ffxen158@gmail.com>
  */
 
 import { CIF } from '../../mol-io/reader/cif';
-import { Vec3 } from '../../mol-math/linear-algebra';
+import { Mat4, Vec3 } from '../../mol-math/linear-algebra';
 import { volumeFromCcp4 } from '../../mol-model-formats/volume/ccp4';
 import { volumeFromDensityServerData } from '../../mol-model-formats/volume/density-server';
 import { volumeFromDsn6 } from '../../mol-model-formats/volume/dsn6';
@@ -15,9 +16,11 @@ import { ParamDefinition as PD } from '../../mol-util/param-definition';
 import { PluginStateObject as SO, PluginStateTransform } from '../objects';
 import { volumeFromCube } from '../../mol-model-formats/volume/cube';
 import { volumeFromDx } from '../../mol-model-formats/volume/dx';
-import { Volume } from '../../mol-model/volume';
+import { Grid, Volume } from '../../mol-model/volume';
 import { PluginContext } from '../../mol-plugin/context';
 import { StateSelection } from '../../mol-state';
+import { volumeFromSegmentationData } from '../../mol-model-formats/volume/segmentation';
+import { getTransformFromParams, TransformParam, transformParamsNeedCentroid } from './helpers';
 
 export { VolumeFromCcp4 };
 export { VolumeFromDsn6 };
@@ -25,6 +28,7 @@ export { VolumeFromCube };
 export { VolumeFromDx };
 export { AssignColorVolume };
 export { VolumeFromDensityServerCif };
+export { VolumeFromSegmentationCif };
 
 type VolumeFromCcp4 = typeof VolumeFromCcp4
 const VolumeFromCcp4 = PluginStateTransform.BuiltIn({
@@ -160,6 +164,44 @@ const VolumeFromDensityServerCif = PluginStateTransform.BuiltIn({
     }
 });
 
+type VolumeFromSegmentationCif = typeof VolumeFromSegmentationCif
+const VolumeFromSegmentationCif = PluginStateTransform.BuiltIn({
+    name: 'volume-from-segmentation-cif',
+    display: { name: 'Volume from Segmentation CIF' },
+    from: SO.Format.Cif,
+    to: SO.Volume.Data,
+    params(a) {
+        const blocks = a?.data.blocks.slice(1);
+        const blockHeaderParam = blocks ?
+            PD.Optional(PD.Select(blocks[0] && blocks[0].header, blocks.map(b => [b.header, b.header] as [string, string]), { description: 'Header of the block to parse' }))
+            : PD.Optional(PD.Text(void 0, { description: 'Header of the block to parse. If none is specifed, the 1st data block in the file is used.' }));
+        return {
+            blockHeader: blockHeaderParam,
+            segmentLabels: PD.ObjectList({ id: PD.Numeric(-1), label: PD.Text('') }, s => `${s.id} = ${s.label}`, { description: 'Mapping of segment IDs to segment labels' }),
+            ownerId: PD.Text('', { isHidden: true, description: 'Reference to the object which manages this volume' }),
+        };
+    }
+})({
+    isApplicable: a => a.data.blocks.length > 0,
+    apply({ a, params }) {
+        return Task.create('Parse segmentation CIF', async ctx => {
+            const header = params.blockHeader || a.data.blocks[1].header; // zero block contains query meta-data
+            const block = a.data.blocks.find(b => b.header === header);
+            if (!block) throw new Error(`Data block '${[header]}' not found.`);
+            const segmentationCif = CIF.schema.segmentation(block);
+            const segmentLabels: { [id: number]: string } = {};
+            for (const segment of params.segmentLabels) segmentLabels[segment.id] = segment.label;
+            const volume = await volumeFromSegmentationData(segmentationCif, { segmentLabels, ownerId: params.ownerId }).runInContext(ctx);
+            const [x, y, z] = volume.grid.cells.space.dimensions;
+            const props = { label: segmentationCif.volume_data_3d_info.name.value(0), description: `Segmentation ${x}\u00D7${y}\u00D7${z}` };
+            return new SO.Volume.Data(volume, props);
+        });
+    },
+    dispose({ b }) {
+        b?.data.customProperties.dispose();
+    }
+});
+
 type AssignColorVolume = typeof AssignColorVolume
 const AssignColorVolume = PluginStateTransform.BuiltIn({
     name: 'assign-color-volume',
@@ -188,4 +230,69 @@ const AssignColorVolume = PluginStateTransform.BuiltIn({
             return new SO.Volume.Data(volume, props);
         });
     }
+});
+
+export type VolumeTransform = typeof VolumeTransform;
+export const VolumeTransform = PluginStateTransform.BuiltIn({
+    name: 'volume-transform',
+    display: { name: 'Transform Volume' },
+    isDecorator: true,
+    from: SO.Volume.Data,
+    to: SO.Volume.Data,
+    params: {
+        transform: TransformParam,
+    },
+})({
+    canAutoUpdate() {
+        return false;
+    },
+    apply({ a, params }) {
+        // similar to StateTransforms.Model.TransformStructureConformation;
+        const center = transformParamsNeedCentroid(params.transform) ? Grid.getBoundingSphere(a.data.grid).center : Vec3.unit;
+        const transform = getTransformFromParams(params.transform, center);
+        const gridTransform = {
+            kind: 'matrix' as const,
+            matrix: Mat4.mul(Mat4(), transform, Grid.getGridToCartesianTransform(a.data.grid)),
+        };
+        return new SO.Volume.Data({
+            ...a.data,
+            grid: {
+                ...a.data.grid,
+                transform: gridTransform,
+            },
+        }, {
+            label: a.label,
+            description: `${a.description} [Transformed]`,
+        });
+    },
+});
+
+export type VolumeInstances = typeof VolumeInstances;
+export const VolumeInstances = PluginStateTransform.BuiltIn({
+    name: 'volume-instances',
+    display: { name: 'Volume Instances' },
+    isDecorator: true,
+    from: SO.Volume.Data,
+    to: SO.Volume.Data,
+    params: {
+        transforms: PD.ObjectList({ transform: TransformParam }, () => 'Transform')
+    },
+})({
+    canAutoUpdate() {
+        return true;
+    },
+    apply({ a, params }) {
+        const center = params.transforms.some(t => transformParamsNeedCentroid(t.transform)) ? Grid.getBoundingSphere(a.data.grid).center : Vec3.unit;
+        const instances = params.transforms.map(t => ({ transform: getTransformFromParams(t.transform, center) }));
+        if (!instances.length) {
+            return a;
+        }
+        return new SO.Volume.Data({
+            ...a.data,
+            instances,
+        }, {
+            label: a.label,
+            description: `${a.description} [Instanced]`,
+        });
+    },
 });

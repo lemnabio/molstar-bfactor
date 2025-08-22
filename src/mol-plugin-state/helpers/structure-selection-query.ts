@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2022 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
@@ -7,7 +7,7 @@
 
 import { CustomProperty } from '../../mol-model-props/common/custom-property';
 import { QueryContext, Structure, StructureQuery, StructureSelection, StructureProperties, StructureElement } from '../../mol-model/structure';
-import { BondType, NucleicBackboneAtoms, ProteinBackboneAtoms, SecondaryStructureType, AminoAcidNamesL, RnaBaseNames, DnaBaseNames, WaterNames, ElementSymbol } from '../../mol-model/structure/model/types';
+import { BondType, NucleicBackboneAtoms, ProteinBackboneAtoms, SecondaryStructureType, AminoAcidNamesL, RnaBaseNames, DnaBaseNames, WaterNames, ElementSymbol, PolymerNames, CommonProteinCaps } from '../../mol-model/structure/model/types';
 import { PluginContext } from '../../mol-plugin/context';
 import { MolScriptBuilder as MS } from '../../mol-script/language/builder';
 import { Expression } from '../../mol-script/language/expression';
@@ -18,6 +18,7 @@ import { SetUtils } from '../../mol-util/set';
 import { PluginStateObject } from '../objects';
 import { StateTransforms } from '../transforms';
 import { ElementNames } from '../../mol-model/structure/model/properties/atomic/types';
+import { SecondaryStructureProvider } from '../../mol-model-props/computed/secondary-structure';
 
 export enum StructureSelectionCategory {
     Type = 'Type',
@@ -250,7 +251,12 @@ const helix = StructureSelectionQuery('Helix', MS.struct.modifier.union([
             MS.core.type.bitflags([SecondaryStructureType.Flag.Helix])
         ])
     })
-]), { category: StructureSelectionCategory.Structure });
+]), {
+    category: StructureSelectionCategory.Structure,
+    ensureCustomProperties: (ctx: CustomProperty.Context, structure: Structure) => {
+        return SecondaryStructureProvider.attach(ctx, structure);
+    }
+});
 
 const beta = StructureSelectionQuery('Beta Strand/Sheet', MS.struct.modifier.union([
     MS.struct.generator.atomGroups({
@@ -260,7 +266,12 @@ const beta = StructureSelectionQuery('Beta Strand/Sheet', MS.struct.modifier.uni
             MS.core.type.bitflags([SecondaryStructureType.Flag.Beta])
         ])
     })
-]), { category: StructureSelectionCategory.Structure });
+]), {
+    category: StructureSelectionCategory.Structure,
+    ensureCustomProperties: (ctx: CustomProperty.Context, structure: Structure) => {
+        return SecondaryStructureProvider.attach(ctx, structure);
+    }
+});
 
 const water = StructureSelectionQuery('Water', MS.struct.modifier.union([
     MS.struct.generator.atomGroups({
@@ -309,33 +320,55 @@ const branchedConnectedOnly = StructureSelectionQuery('Connected to Carbohydrate
 ]), { category: StructureSelectionCategory.Internal, isHidden: true });
 
 const ligand = StructureSelectionQuery('Ligand', MS.struct.modifier.union([
-    MS.struct.combinator.merge([
-        MS.struct.modifier.union([
-            MS.struct.generator.atomGroups({
-                'entity-test': MS.core.logic.and([
-                    MS.core.logic.or([
-                        MS.core.rel.eq([MS.ammp('entityType'), 'non-polymer']),
-                        MS.core.rel.neq([MS.ammp('entityPrdId'), ''])
-                    ]),
-                    MS.core.logic.not([MS.core.str.match([
-                        MS.re('(oligosaccharide|lipid|ion)', 'i'),
-                        MS.ammp('entitySubtype')
-                    ])])
+    MS.struct.modifier.exceptBy({
+        0: MS.struct.modifier.union([
+            MS.struct.combinator.merge([
+                MS.struct.modifier.union([
+                    MS.struct.generator.atomGroups({
+                        'entity-test': MS.core.logic.and([
+                            MS.core.logic.or([
+                                MS.core.rel.eq([MS.ammp('entityType'), 'non-polymer']),
+                                MS.core.rel.neq([MS.ammp('entityPrdId'), ''])
+                            ]),
+                            MS.core.logic.not([MS.core.str.match([
+                                MS.re('(oligosaccharide|lipid|ion)', 'i'),
+                                MS.ammp('entitySubtype')
+                            ])])
+                        ]),
+                        'chain-test': MS.core.rel.eq([MS.ammp('objectPrimitive'), 'atomistic']),
+                        'residue-test': MS.core.logic.not([
+                            MS.core.str.match([MS.re('saccharide', 'i'), MS.ammp('chemCompType')])
+                        ])
+                    })
                 ]),
-                'chain-test': MS.core.rel.eq([MS.ammp('objectPrimitive'), 'atomistic']),
-                'residue-test': MS.core.logic.not([
-                    MS.core.str.match([MS.re('saccharide', 'i'), MS.ammp('chemCompType')])
+                MS.struct.modifier.union([
+                    MS.struct.generator.atomGroups({
+                        'entity-test': MS.core.rel.eq([MS.ammp('entityType'), 'polymer']),
+                        'chain-test': MS.core.rel.eq([MS.ammp('objectPrimitive'), 'atomistic']),
+                        'residue-test': _nonPolymerResidueTest
+                    })
                 ])
-            })
+            ]),
         ]),
-        MS.struct.modifier.union([
+        by: MS.struct.combinator.merge([
+            MS.struct.modifier.union([
+                MS.struct.generator.atomGroups({
+                    'entity-test': MS.core.rel.eq([MS.ammp('entityType'), 'polymer']),
+                    'chain-test': MS.core.rel.eq([MS.ammp('objectPrimitive'), 'atomistic']),
+                    'residue-test': MS.core.set.has([
+                        MS.set(...SetUtils.toArray(PolymerNames)), MS.ammp('label_comp_id')
+                    ])
+                }),
+            ]),
             MS.struct.generator.atomGroups({
-                'entity-test': MS.core.rel.eq([MS.ammp('entityType'), 'polymer']),
                 'chain-test': MS.core.rel.eq([MS.ammp('objectPrimitive'), 'atomistic']),
-                'residue-test': _nonPolymerResidueTest
-            })
+                'residue-test': MS.core.set.has([
+                    MS.set(...SetUtils.toArray(CommonProteinCaps)),
+                    MS.ammp('label_comp_id'),
+                ]),
+            }),
         ])
-    ]),
+    })
 ]), { category: StructureSelectionCategory.Type });
 
 // don't include branched entities as they have their own link representation
@@ -718,9 +751,9 @@ export const StructureSelectionQueries = {
 };
 
 export class StructureSelectionQueryRegistry {
-    list: StructureSelectionQuery[] = []
-    options: [StructureSelectionQuery, string, string][] = []
-    version = 1
+    list: StructureSelectionQuery[] = [];
+    options: [StructureSelectionQuery, string, string][] = [];
+    version = 1;
 
     add(q: StructureSelectionQuery) {
         this.list.push(q);

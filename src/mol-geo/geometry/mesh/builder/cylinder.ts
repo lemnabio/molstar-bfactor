@@ -1,7 +1,8 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Gianluca Tomasello <giagitom@gmail.com>
  */
 
 import { Vec3, Mat4 } from '../../../../mol-math/linear-algebra';
@@ -11,6 +12,7 @@ import { Cylinder, CylinderProps, DefaultCylinderProps } from '../../../primitiv
 import { Prism } from '../../../primitive/prism';
 import { polygon } from '../../../primitive/polygon';
 import { hashFnv32a } from '../../../../mol-data/util';
+import { Ray3D } from '../../../../mol-math/geometry/primitives/ray3d';
 
 const cylinderMap = new Map<number, Primitive>();
 const up = Vec3.create(0, 1, 0);
@@ -76,6 +78,11 @@ export function addSimpleCylinder(state: MeshBuilder.State, start: Vec3, end: Ve
     MeshBuilder.addPrimitive(state, tmpCylinderMat, getCylinder(props));
 }
 
+export function addCylinderFromRay3D(state: MeshBuilder.State, ray: Ray3D, length: number, props: BasicCylinderProps) {
+    setCylinderMat(tmpCylinderMat, ray.origin, ray.direction, length, false);
+    MeshBuilder.addPrimitive(state, tmpCylinderMat, getCylinder(props));
+}
+
 export function addCylinder(state: MeshBuilder.State, start: Vec3, end: Vec3, lengthScale: number, props: BasicCylinderProps) {
     const d = Vec3.distance(start, end) * lengthScale;
     Vec3.sub(tmpCylinderDir, end, start);
@@ -97,26 +104,27 @@ export function addDoubleCylinder(state: MeshBuilder.State, start: Vec3, end: Ve
     MeshBuilder.addPrimitive(state, tmpCylinderMat, cylinder);
 }
 
-export function addFixedCountDashedCylinder(state: MeshBuilder.State, start: Vec3, end: Vec3, lengthScale: number, segmentCount: number, props: BasicCylinderProps) {
-    const s = Math.floor(segmentCount / 2);
-    const step = 1 / segmentCount;
-
-    // automatically adjust length so links/bonds that are rendered as two half cylinders
-    // have evenly spaced dashed cylinders
-    if (lengthScale < 1) {
-        const bias = lengthScale / 2 / segmentCount;
-        lengthScale += segmentCount % 2 === 1 ? bias : -bias;
-    }
-
+export function addFixedCountDashedCylinder(state: MeshBuilder.State, start: Vec3, end: Vec3, lengthScale: number, segmentCount: number, stubCap: boolean, props: BasicCylinderProps) {
     const d = Vec3.distance(start, end) * lengthScale;
-    const cylinder = getCylinder(props);
-    Vec3.sub(tmpCylinderDir, end, start);
+    const isOdd = segmentCount % 2 !== 0;
+    const s = Math.floor((segmentCount + 1) / 2);
+    let step = d / (segmentCount + 0.5);
 
+    let cylinder = getCylinder(props);
+    Vec3.setMagnitude(tmpCylinderDir, Vec3.sub(tmpCylinderDir, end, start), step);
+    Vec3.copy(tmpCylinderStart, start);
     for (let j = 0; j < s; ++j) {
-        const f = step * (j * 2 + 1);
-        Vec3.setMagnitude(tmpCylinderDir, tmpCylinderDir, d * f);
-        Vec3.add(tmpCylinderStart, start, tmpCylinderDir);
-        setCylinderMat(tmpCylinderMat, tmpCylinderStart, tmpCylinderDir, d * step, false);
+        Vec3.add(tmpCylinderStart, tmpCylinderStart, tmpCylinderDir);
+        if (isOdd && j === s - 1) {
+            if (!stubCap && props.topCap) {
+                props.topCap = false;
+                cylinder = getCylinder(props);
+            }
+            step /= 2;
+        }
+        setCylinderMat(tmpCylinderMat, tmpCylinderStart, tmpCylinderDir, step, false);
         MeshBuilder.addPrimitive(state, tmpCylinderMat, cylinder);
+
+        Vec3.add(tmpCylinderStart, tmpCylinderStart, tmpCylinderDir);
     }
 }

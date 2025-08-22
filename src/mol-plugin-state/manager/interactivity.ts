@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2019-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Adam Midlik <midlik@gmail.com>
  */
 
 import { EveryLoci, isEmptyLoci, Loci } from '../../mol-model/loci';
@@ -36,7 +37,7 @@ class InteractivityManager extends StatefulPluginComponent<InteractivityManagerS
     readonly lociSelects: InteractivityManager.LociSelectManager;
     readonly lociHighlights: InteractivityManager.LociHighlightManager;
 
-    private _props = PD.getDefaultValues(InteractivityManager.Params)
+    private _props = PD.getDefaultValues(InteractivityManager.Params);
 
     readonly events = {
         propsUpdated: this.ev()
@@ -53,6 +54,12 @@ class InteractivityManager extends StatefulPluginComponent<InteractivityManagerS
         this.lociSelects.setProps(_new);
         this.lociHighlights.setProps(_new);
         this.events.propsUpdated.next(void 0);
+    }
+
+    dispose() {
+        super.dispose();
+        this.lociSelects.dispose();
+        this.lociHighlights.dispose();
     }
 
     constructor(readonly plugin: PluginContext, props: Partial<InteractivityManager.Props> = {}) {
@@ -76,17 +83,19 @@ namespace InteractivityManager {
 
     /**
      * The `noRender` argument indicates that the action should only update the internal
-     * data structure but not render anything user visible. For example 1) no drawing of
-     * the canvas3d scene or 2) no ui update of loci labels. This is useful because some
-     * actions require clearing any markings before they can be applied.
+     * data structure but not render anything user visible. For example, no ui update of
+     * loci labels.
+     *
+     * This is useful because some actions require clearing any markings before
+     * they can be applied.
      */
     export type LociMarkProvider = (loci: Representation.Loci, action: MarkerAction, /* test */ noRender?: boolean) => void
 
     export abstract class LociMarkManager {
         protected providers: LociMarkProvider[] = [];
-        protected sel: StructureSelectionManager
+        protected sel: StructureSelectionManager;
 
-        readonly props: Readonly<Props> = PD.getDefaultValues(Params)
+        readonly props: Readonly<Props> = PD.getDefaultValues(Params);
 
         setProps(props: Partial<Props>) {
             Object.assign(this.props, props);
@@ -111,6 +120,11 @@ namespace InteractivityManager {
             if (!Loci.isEmpty(current.loci)) {
                 for (const p of this.providers) p(current, action, noRender);
             }
+        }
+
+        dispose() {
+            this.providers.length = 0;
+            this.sel.dispose();
         }
 
         constructor(public readonly ctx: PluginContext, props: Partial<Props> = {}) {
@@ -141,7 +155,7 @@ namespace InteractivityManager {
                 this.mark(p, MarkerAction.RemoveHighlight, noRender);
             }
             this.prev.length = 0;
-        }
+        };
 
         highlight(current: Representation.Loci, applyGranularity = true) {
             const normalized = this.normalizedLoci(current, applyGranularity);
@@ -165,8 +179,9 @@ namespace InteractivityManager {
         highlightOnlyExtend(current: Representation.Loci, applyGranularity = true) {
             const normalized = this.normalizedLoci(current, applyGranularity);
             if (StructureElement.Loci.is(normalized.loci)) {
+                const range = this.ctx.selectionMode ? this.sel.tryGetRange(normalized.loci) : this.ctx.managers.structure.focus.tryGetRange(normalized.loci);
                 const extended = {
-                    loci: this.sel.tryGetRange(normalized.loci) || normalized.loci,
+                    loci: range ?? normalized.loci,
                     repr: normalized.repr
                 };
                 if (!this.isHighlighted(extended)) {
@@ -178,6 +193,11 @@ namespace InteractivityManager {
                     }
                 }
             }
+        }
+
+        dispose() {
+            super.dispose();
+            this.prev.length = 0;
         }
     }
 
@@ -226,7 +246,7 @@ namespace InteractivityManager {
             const normalized = this.normalizedLoci(current, applyGranularity, true);
             if (StructureElement.Loci.is(normalized.loci)) {
                 // only deselect for the structure of the given loci
-                this.deselect({ loci: Structure.toStructureElementLoci(normalized.loci.structure), repr: normalized.repr }, false);
+                this.mark({ loci: Structure.Loci(normalized.loci.structure), repr: normalized.repr }, MarkerAction.Deselect);
                 this.sel.modify('set', normalized.loci);
             }
             this.mark(normalized, MarkerAction.Select);

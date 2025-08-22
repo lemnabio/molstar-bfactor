@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2023 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
@@ -75,8 +75,8 @@ function getAltId(unit: Unit.Atomic, index: StructureElement.UnitIndex) {
 }
 
 function getDirection(direction: Vec3, unit: Unit.Atomic, index: ElementIndex, center: Vec3) {
-    const { position } = unit.conformation;
-    Vec3.normalize(direction, Vec3.sub(direction, center, position(index, direction)));
+    const c = unit.conformation;
+    Vec3.normalize(direction, Vec3.sub(direction, center, c.position(index, direction)));
     return direction;
 }
 
@@ -141,10 +141,10 @@ export function computeCarbohydrates(structure: Structure): Carbohydrates {
         Vec3.normalize(elements[iA].geometry.direction, elements[iA].geometry.direction);
     }
 
-    const tmpV = Vec3.zero();
+    const tmpV = Vec3();
     function fixTerminalLinkDirection(iA: number, indexB: number, unitB: Unit.Atomic) {
-        const pos = unitB.conformation.position, geo = elements[iA].geometry;
-        Vec3.sub(geo.direction, pos(unitB.elements[indexB], tmpV), geo.center);
+        const c = unitB.conformation, geo = elements[iA].geometry;
+        Vec3.sub(geo.direction, c.position(unitB.elements[indexB], tmpV), geo.center);
         Vec3.normalize(geo.direction, geo.direction);
     }
 
@@ -189,9 +189,10 @@ export function computeCarbohydrates(structure: Structure): Carbohydrates {
                     const anomericCarbon = getAnomericCarbon(unit, ringAtoms);
 
                     const ma = PrincipalAxes.calculateMomentsAxes(getPositions(unit, ringAtoms));
-                    const center = Vec3.copy(Vec3.zero(), ma.origin);
-                    const normal = Vec3.copy(Vec3.zero(), ma.dirC);
-                    const direction = getDirection(Vec3.zero(), unit, anomericCarbon, center);
+                    const a = PrincipalAxes.calculateNormalizedAxes(ma);
+                    const center = Vec3.copy(Vec3(), a.origin);
+                    const normal = Vec3.copy(Vec3(), a.dirC);
+                    const direction = getDirection(Vec3(), unit, anomericCarbon, center);
                     Vec3.orthogonalize(direction, normal, direction);
 
                     const ringAltId = UnitRing.getAltId(unit, ringAtoms);

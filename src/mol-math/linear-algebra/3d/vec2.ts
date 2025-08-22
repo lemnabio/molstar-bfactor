@@ -50,7 +50,7 @@ namespace Vec2 {
         return isNaN(a[0]) || isNaN(a[1]);
     }
 
-    export function toArray(a: Vec2, out: NumberArray, offset: number) {
+    export function toArray<T extends NumberArray>(a: Vec2, out: T, offset: number) {
         out[offset + 0] = a[0];
         out[offset + 1] = a[1];
         return out;
@@ -155,12 +155,28 @@ namespace Vec2 {
         return x * x + y * y;
     }
 
+    export function setMagnitude(out: Vec2, a: Vec2, l: number) {
+        return scale(out, normalize(out, a), l);
+    }
+
     /**
      * Returns the inverse of the components of a Vec2
      */
     export function inverse(out: Vec2, a: Vec2) {
         out[0] = 1.0 / a[0];
         out[1] = 1.0 / a[1];
+        return out;
+    }
+
+    export function normalize(out: Vec2, a: Vec2) {
+        const x = a[0],
+            y = a[1];
+        let len = x * x + y * y;
+        if (len > 0) {
+            len = 1 / Math.sqrt(len);
+            out[0] = a[0] * len;
+            out[1] = a[1] * len;
+        }
         return out;
     }
 

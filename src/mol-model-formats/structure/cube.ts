@@ -53,22 +53,20 @@ async function getModels(cube: CubeFile, ctx: RuntimeContext) {
     componentBuilder.setNames([['MOL', 'Unknown Molecule']]);
     componentBuilder.add('MOL', 0);
 
-    const basics = createBasic({
+    const basic = createBasic({
         entity: entityBuilder.getEntityTable(),
         chem_comp: componentBuilder.getChemCompTable(),
         atom_site
     });
 
-    return await createModels(basics, MolFormat.create(cube), ctx);
+    return await createModels(basic, CubeFormat.create(cube), ctx);
 }
 
 //
 
-export { CubeFormat };
+export type CubeFormat = ModelFormat<CubeFile>
 
-type CubeFormat = ModelFormat<CubeFile>
-
-namespace MolFormat {
+export namespace CubeFormat {
     export function is(x?: ModelFormat): x is CubeFormat {
         return x?.kind === 'cube';
     }

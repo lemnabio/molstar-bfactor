@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2018 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -25,7 +25,10 @@
 import { Mat3 } from './mat3';
 import { Vec3 } from './vec3';
 import { EPSILON } from './common';
-import { NumberArray } from '../../../mol-util/type-helpers';
+import { assertUnreachable, NumberArray } from '../../../mol-util/type-helpers';
+import { Euler } from './euler';
+import { Mat4 } from './mat4';
+import { clamp } from '../../interpolate';
 
 interface Quat extends Array<number> { [d: number]: number, '@type': 'quat', length: 4 }
 interface ReadonlyQuat extends Array<number> { readonly [d: number]: number, '@type': 'quat', length: 4 }
@@ -238,6 +241,10 @@ namespace Quat {
         return out;
     }
 
+    export function dot(a: Quat, b: Quat) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    }
+
     /**
      * Creates a quaternion from the given 3x3 rotation matrix.
      *
@@ -277,7 +284,70 @@ namespace Quat {
         return out;
     }
 
-    const fromUnitVec3Temp = [0, 0, 0] as Vec3;
+    const m3tmp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] as unknown as Mat3;
+    export function fromMat4(out: Quat, m: Mat4) {
+        Mat3.fromMat4(m3tmp, m);
+        return fromMat3(out, m3tmp);
+    }
+
+    export function fromEuler(out: Quat, euler: Euler, order: Euler.Order) {
+        const [x, y, z] = euler;
+
+        // http://www.mathworks.com/matlabcentral/fileexchange/20696-function-to-convert-between-dcm-euler-angles-quaternions-and-euler-vectors/content/SpinCalc.m
+
+        const c1 = Math.cos(x / 2);
+        const c2 = Math.cos(y / 2);
+        const c3 = Math.cos(z / 2);
+
+        const s1 = Math.sin(x / 2);
+        const s2 = Math.sin(y / 2);
+        const s3 = Math.sin(z / 2);
+
+        switch (order) {
+            case 'XYZ':
+                out[0] = s1 * c2 * c3 + c1 * s2 * s3;
+                out[1] = c1 * s2 * c3 - s1 * c2 * s3;
+                out[2] = c1 * c2 * s3 + s1 * s2 * c3;
+                out[3] = c1 * c2 * c3 - s1 * s2 * s3;
+                break;
+            case 'YXZ':
+                out[0] = s1 * c2 * c3 + c1 * s2 * s3;
+                out[1] = c1 * s2 * c3 - s1 * c2 * s3;
+                out[2] = c1 * c2 * s3 - s1 * s2 * c3;
+                out[3] = c1 * c2 * c3 + s1 * s2 * s3;
+                break;
+            case 'ZXY':
+                out[0] = s1 * c2 * c3 - c1 * s2 * s3;
+                out[1] = c1 * s2 * c3 + s1 * c2 * s3;
+                out[2] = c1 * c2 * s3 + s1 * s2 * c3;
+                out[3] = c1 * c2 * c3 - s1 * s2 * s3;
+                break;
+            case 'ZYX':
+                out[0] = s1 * c2 * c3 - c1 * s2 * s3;
+                out[1] = c1 * s2 * c3 + s1 * c2 * s3;
+                out[2] = c1 * c2 * s3 - s1 * s2 * c3;
+                out[3] = c1 * c2 * c3 + s1 * s2 * s3;
+                break;
+            case 'YZX':
+                out[0] = s1 * c2 * c3 + c1 * s2 * s3;
+                out[1] = c1 * s2 * c3 + s1 * c2 * s3;
+                out[2] = c1 * c2 * s3 - s1 * s2 * c3;
+                out[3] = c1 * c2 * c3 - s1 * s2 * s3;
+                break;
+            case 'XZY':
+                out[0] = s1 * c2 * c3 - c1 * s2 * s3;
+                out[1] = c1 * s2 * c3 - s1 * c2 * s3;
+                out[2] = c1 * c2 * s3 + s1 * s2 * c3;
+                out[3] = c1 * c2 * c3 + s1 * s2 * s3;
+                break;
+            default:
+                assertUnreachable(order);
+        }
+
+        return out;
+    }
+
+    const fromUnitVec3Temp = [0, 0, 0] as unknown as Vec3;
     /** Quaternion from two normalized unit vectors. */
     export function fromUnitVec3(out: Quat, a: Vec3, b: Vec3) {
         // assumes a and b are normalized
@@ -305,6 +375,12 @@ namespace Quat {
         return out;
     }
 
+    const m4tmp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] as unknown as Mat4;
+    export function fromBasis(out: Quat, x: Vec3, y: Vec3, z: Vec3) {
+        Mat4.fromBasis(m4tmp, x, y, z);
+        return fromMat4(out, m4tmp);
+    }
+
     export function clone(a: Quat) {
         const out = zero();
         out[0] = a[0];
@@ -314,7 +390,15 @@ namespace Quat {
         return out;
     }
 
-    export function toArray(a: Quat, out: NumberArray, offset: number) {
+    export function fromObj(a: { x: number, y: number, z: number, w: number }): Quat {
+        return create(a.x, a.y, a.z, a.w);
+    }
+
+    export function toObj(a: Quat) {
+        return { x: a[0], y: a[1], z: a[2], w: a[3] };
+    }
+
+    export function toArray<T extends NumberArray>(a: Quat, out: T, offset: number) {
         out[offset + 0] = a[0];
         out[offset + 1] = a[1];
         out[offset + 2] = a[2];
@@ -346,12 +430,45 @@ namespace Quat {
         return out;
     }
 
+    /**
+     * Returns whether or not the quaternions have exactly the same elements in the same position (when compared with ===)
+     */
+    export function exactEquals(a: Quat, b: Quat) {
+        return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+    }
+
+    /**
+     * Returns whether or not the quaternions have approximately the same elements in the same position.
+     */
+    export function equals(a: Quat, b: Quat) {
+        const a0 = a[0], a1 = a[1], a2 = a[2], a3 = a[3];
+        const b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3];
+        return (Math.abs(a0 - b0) <= EPSILON * Math.max(1.0, Math.abs(a0), Math.abs(b0)) &&
+                Math.abs(a1 - b1) <= EPSILON * Math.max(1.0, Math.abs(a1), Math.abs(b1)) &&
+                Math.abs(a2 - b2) <= EPSILON * Math.max(1.0, Math.abs(a2), Math.abs(b2)) &&
+                Math.abs(a3 - b3) <= EPSILON * Math.max(1.0, Math.abs(a3), Math.abs(b3)));
+    }
+
     export function add(out: Quat, a: Quat, b: Quat) {
         out[0] = a[0] + b[0];
         out[1] = a[1] + b[1];
         out[2] = a[2] + b[2];
         out[3] = a[3] + b[3];
         return out;
+    }
+
+    export function magnitude(a: Quat): number {
+        const x = a[0], y = a[1], z = a[2], w = a[3];
+        return Math.sqrt(x * x + y * y + z * z + w * w);
+    }
+
+    export function squaredMagnitude(a: Quat): number {
+        const x = a[0], y = a[1], z = a[2], w = a[3];
+        return x * x + y * y + z * z + w * w;
+    }
+
+    export function angle(a: Quat, b: Quat): number {
+        return 2 * Math.acos(Math.abs(clamp(dot(a, b), -1, 1)));
     }
 
     export function normalize(out: Quat, a: Quat) {
@@ -376,9 +493,9 @@ namespace Quat {
      *
      * Both vectors are assumed to be unit length.
      */
-    const rotTmpVec3 = [0, 0, 0] as Vec3;
-    const rotTmpVec3UnitX = [1, 0, 0] as Vec3;
-    const rotTmpVec3UnitY = [0, 1, 0] as Vec3;
+    const rotTmpVec3 = [0, 0, 0] as unknown as Vec3;
+    const rotTmpVec3UnitX = [1, 0, 0] as unknown as Vec3;
+    const rotTmpVec3UnitY = [0, 1, 0] as unknown as Vec3;
     export function rotationTo(out: Quat, a: Vec3, b: Vec3) {
         const dot = Vec3.dot(a, b);
         if (dot < -0.999999) {
@@ -421,7 +538,7 @@ namespace Quat {
      * axes. Each axis is a vec3 and is expected to be unit length and
      * perpendicular to all other specified axes.
      */
-    const axesTmpMat = [0, 0, 0, 0, 0, 0, 0, 0, 0] as Mat3;
+    const axesTmpMat = [0, 0, 0, 0, 0, 0, 0, 0, 0] as unknown as Mat3;
     export function setAxes(out: Quat, view: Vec3, right: Vec3, up: Vec3) {
         axesTmpMat[0] = right[0];
         axesTmpMat[3] = right[1];

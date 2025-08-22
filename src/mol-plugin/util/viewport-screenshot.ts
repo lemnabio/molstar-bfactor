@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2019-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -7,7 +7,9 @@
 
 import { Viewport } from '../../mol-canvas3d/camera/util';
 import { CameraHelperParams } from '../../mol-canvas3d/helper/camera-helper';
+import { IlluminationProps } from '../../mol-canvas3d/passes/illumination';
 import { ImagePass } from '../../mol-canvas3d/passes/image';
+import { PostprocessingProps } from '../../mol-canvas3d/passes/postprocessing';
 import { canvasToBlob } from '../../mol-canvas3d/util';
 import { equalEps } from '../../mol-math/linear-algebra/3d/common';
 import { PluginComponent } from '../../mol-plugin-state/component';
@@ -20,18 +22,33 @@ import { ParamDefinition as PD } from '../../mol-util/param-definition';
 import { SetUtils } from '../../mol-util/set';
 import { PluginContext } from '../context';
 
-export { ViewportScreenshotHelper, ViewportScreenshotHelperParams };
-
-namespace ViewportScreenshotHelper {
+export namespace ViewportScreenshotHelper {
     export type ResolutionSettings = PD.Values<ReturnType<ViewportScreenshotHelper['createParams']>>['resolution']
     export type ResolutionTypes = ResolutionSettings['name']
 }
 
-type ViewportScreenshotHelperParams = PD.Values<ReturnType<ViewportScreenshotHelper['createParams']>>
+export type ViewportScreenshotHelperParams = PD.Values<ReturnType<ViewportScreenshotHelper['createParams']>>
 
-class ViewportScreenshotHelper extends PluginComponent {
+function checkWebPSupport() {
+    // adapted from https://stackoverflow.com/a/27232658
+    const elem = document.createElement('canvas');
+
+    if (!!(elem.getContext && elem.getContext('2d'))) {
+        // was able or not to get WebP representation
+        return elem.toDataURL('image/webp').indexOf('data:image/webp') === 0;
+    } else {
+        // very old browser like IE 8, canvas not supported
+        return false;
+    }
+}
+
+export class ViewportScreenshotHelper extends PluginComponent {
     private createParams() {
-        const max = Math.min(this.plugin.canvas3d ? this.plugin.canvas3d.webgl.maxRenderbufferSize : 4096, 4096);
+        let max = 8192;
+        if (this.plugin.canvas3d) {
+            const { webgl } = this.plugin.canvas3d;
+            max = Math.floor(Math.min(webgl.maxRenderbufferSize, webgl.maxTextureSize) / 2);
+        }
         return {
             resolution: PD.MappedStatic('viewport', {
                 viewport: PD.Group({}),
@@ -51,8 +68,27 @@ class ViewportScreenshotHelper extends PluginComponent {
                     ['custom', 'Custom']
                 ]
             }),
+            format: PD.MappedStatic('png', {
+                png: PD.Group({}),
+                webp: PD.Group({
+                    quality: PD.Numeric(0.9, { min: 0, max: 1, step: 0.01 })
+                }),
+                jpeg: PD.Group({
+                    quality: PD.Numeric(0.9, { min: 0, max: 1, step: 0.01 })
+                }),
+            }, {
+                options: [
+                    ['png', 'PNG'],
+                    ['jpeg', 'JPEG'],
+                    ...(checkWebPSupport() ? [['webp', 'WebP'] as ['webp', string]] : []),
+                ]
+            }),
             transparent: PD.Boolean(false),
             axes: CameraHelperParams.axes,
+            illumination: PD.Group({
+                extraIterations: PD.Numeric(1, { min: 0, max: 5, step: 1 }),
+                targetIterationTimeMs: PD.Numeric(300, { min: 100, max: 3000, step: 10 }),
+            }),
         };
     }
     private _params: ReturnType<ViewportScreenshotHelper['createParams']> = void 0 as any;
@@ -64,8 +100,10 @@ class ViewportScreenshotHelper extends PluginComponent {
     readonly behaviors = {
         values: this.ev.behavior<ViewportScreenshotHelperParams>({
             transparent: this.params.transparent.defaultValue,
+            format: { name: 'png', params: {} },
             axes: { name: 'off', params: {} },
-            resolution: this.params.resolution.defaultValue
+            resolution: this.params.resolution.defaultValue,
+            illumination: this.params.illumination.defaultValue,
         }),
         cropParams: this.ev.behavior<{ auto: boolean, relativePadding: number }>({ auto: true, relativePadding: 0.1 }),
         relativeCrop: this.ev.behavior<Viewport>({ x: 0, y: 0, width: 1, height: 1 }),
@@ -105,55 +143,72 @@ class ViewportScreenshotHelper extends PluginComponent {
         }
     }
 
-    private createPass(mutlisample: boolean) {
+    private getPostprocessingProps() {
+        const c = this.plugin.canvas3d!;
+        const aoProps = c.props.postprocessing.occlusion;
+        return {
+            ...c.props.postprocessing,
+            occlusion: aoProps.name === 'on'
+                ? { name: 'on', params: { ...aoProps.params, samples: 128, resolutionScale: c.webgl.pixelRatio, transparentThreshold: 1 } }
+                : aoProps
+        } as PostprocessingProps;
+    }
+
+    private getIlluminationProps(isPreview: boolean) {
+        const c = this.plugin.canvas3d!;
+        const giProps = c.props.illumination;
+        const { extraIterations, targetIterationTimeMs } = this.values.illumination;
+        return {
+            ...giProps,
+            enabled: isPreview ? false : giProps.enabled,
+            maxIterations: Math.ceil(Math.log2(Math.pow(2, giProps.maxIterations + extraIterations) * giProps.rendersPerFrame[1])),
+            targetFps: 1000 / targetIterationTimeMs,
+            denoiseThreshold: [giProps.denoiseThreshold[0], giProps.denoiseThreshold[0]],
+            rendersPerFrame: [1, 1],
+        } as IlluminationProps;
+    }
+
+    private createPass(isPreview: boolean) {
         const c = this.plugin.canvas3d!;
         const { colorBufferFloat, textureFloat } = c.webgl.extensions;
-        const aoProps = c.props.postprocessing.occlusion;
         return c.getImagePass({
             transparentBackground: this.values.transparent,
             cameraHelper: { axes: this.values.axes },
             multiSample: {
-                mode: mutlisample ? 'on' : 'off',
-                sampleLevel: colorBufferFloat && textureFloat ? 4 : 2
+                ...c.props.multiSample,
+                mode: isPreview ? 'off' : 'on',
+                sampleLevel: colorBufferFloat && textureFloat ? 4 : 2,
+                reuseOcclusion: false,
             },
-            postprocessing: {
-                ...c.props.postprocessing,
-                occlusion: aoProps.name === 'on'
-                    ? { name: 'on', params: { ...aoProps.params, samples: 128 } }
-                    : aoProps
-            },
-            marking: { ...c.props.marking }
+            postprocessing: this.getPostprocessingProps(),
+            marking: { ...c.props.marking },
+            illumination: this.getIlluminationProps(isPreview),
         });
     }
 
     private _previewPass: ImagePass;
     private get previewPass() {
-        return this._previewPass || (this._previewPass = this.createPass(false));
+        return this._previewPass || (this._previewPass = this.createPass(true));
     }
 
     private _imagePass: ImagePass;
     get imagePass() {
         if (this._imagePass) {
             const c = this.plugin.canvas3d!;
-            const aoProps = c.props.postprocessing.occlusion;
             this._imagePass.setProps({
                 cameraHelper: { axes: this.values.axes },
                 transparentBackground: this.values.transparent,
-                // TODO: optimize because this creates a copy of a large object!
-                postprocessing: {
-                    ...c.props.postprocessing,
-                    occlusion: aoProps.name === 'on'
-                        ? { name: 'on', params: { ...aoProps.params, samples: 128 } }
-                        : aoProps
-                },
-                marking: { ...c.props.marking }
+                postprocessing: this.getPostprocessingProps(),
+                marking: { ...c.props.marking },
+                illumination: this.getIlluminationProps(false),
             });
             return this._imagePass;
         }
-        return this._imagePass = this.createPass(true);
+        return this._imagePass = this.createPass(false);
     }
 
-    getFilename(extension = '.png') {
+    getFilename(extension?: string) {
+        if (typeof extension !== 'string') extension = this.extension;
         const models = this.plugin.state.data.select(StateSelection.Generators.rootsOfType(PluginStateObject.Molecule.Model)).map(s => s.obj!.data);
         const uniqueIds = new Set<string>();
         models.forEach(m => uniqueIds.add(m.entryId.toUpperCase()));
@@ -249,7 +304,7 @@ class ViewportScreenshotHelper extends PluginComponent {
         this.behaviors.relativeCrop.next(crop);
     }
 
-    getPreview(maxDim = 320) {
+    async getPreview(ctx: RuntimeContext, maxDim = 320) {
         const { width, height } = this.getSize();
         if (width <= 0 || height <= 0) return;
 
@@ -268,11 +323,10 @@ class ViewportScreenshotHelper extends PluginComponent {
         this.previewPass.setProps({
             cameraHelper: { axes: this.values.axes },
             transparentBackground: this.values.transparent,
-            // TODO: optimize because this creates a copy of a large object!
             postprocessing: canvasProps.postprocessing,
-            marking: canvasProps.marking
+            marking: canvasProps.marking,
         });
-        const imageData = this.previewPass.getImageData(w, h);
+        const imageData = await this.previewPass.getImageData(ctx, w, h);
         const canvas = this.previewCanvas;
         canvas.width = imageData.width;
         canvas.height = imageData.height;
@@ -308,16 +362,23 @@ class ViewportScreenshotHelper extends PluginComponent {
         const { width, height, viewport } = this.getSizeAndViewport();
         if (width <= 0 || height <= 0) return;
 
-        await ctx.update('Rendering image...');
-        const imageData = this.imagePass.getImageData(width, height, viewport);
+        this.plugin.canvas3d?.pause(true);
+        try {
+            await ctx.update('Rendering image...');
+            const pass = this.imagePass;
+            await pass.updateBackground();
+            const imageData = await pass.getImageData(ctx, width, height, viewport);
 
-        await ctx.update('Encoding image...');
-        const canvas = this.canvas;
-        canvas.width = imageData.width;
-        canvas.height = imageData.height;
-        const canvasCtx = canvas.getContext('2d');
-        if (!canvasCtx) throw new Error('Could not create canvas 2d context');
-        canvasCtx.putImageData(imageData, 0, 0);
+            await ctx.update('Encoding image...');
+            const canvas = this.canvas;
+            canvas.width = imageData.width;
+            canvas.height = imageData.height;
+            const canvasCtx = canvas.getContext('2d');
+            if (!canvasCtx) throw new Error('Could not create canvas 2d context');
+            canvasCtx.putImageData(imageData, 0, 0);
+        } finally {
+            this.plugin.canvas3d?.animate();
+        }
         return;
     }
 
@@ -332,18 +393,42 @@ class ViewportScreenshotHelper extends PluginComponent {
         return Task.create('Copy Image', async ctx => {
             await this.draw(ctx);
             await ctx.update('Converting image...');
-            const blob = await canvasToBlob(this.canvas, 'png');
-            const item = new ClipboardItem({ 'image/png': blob });
+            const mime = this.mimeType;
+            const blob = await canvasToBlob(this.canvas, mime, this.quality);
+            const item = new ClipboardItem({ [mime]: blob });
             await cb.write([item]);
             this.plugin.log.message('Image copied to clipboard.');
         });
+    }
+
+    private get mimeType() {
+        return `image/${this.values.format?.name ?? 'png'}`;
+    }
+
+    private get extension() {
+        switch (this.values.format?.name) {
+            case 'jpeg':
+                return '.jpg';
+            default:
+                return `.${this.values.format?.name ?? 'png'}`;
+        }
+    }
+
+    private get quality() {
+        switch (this.values.format?.name) {
+            case 'webp':
+            case 'jpeg':
+                return this.values.format?.params?.quality ?? 0.9;
+            default:
+                return undefined;
+        }
     }
 
     getImageDataUri() {
         return this.plugin.runTask(Task.create('Generate Image', async ctx => {
             await this.draw(ctx);
             await ctx.update('Converting image...');
-            return this.canvas.toDataURL('png');
+            return this.canvas.toDataURL(this.mimeType);
         }));
     }
 
@@ -357,13 +442,13 @@ class ViewportScreenshotHelper extends PluginComponent {
         return Task.create('Download Image', async ctx => {
             await this.draw(ctx);
             await ctx.update('Downloading image...');
-            const blob = await canvasToBlob(this.canvas, 'png');
-            download(blob, filename ?? this.getFilename());
+            const blob = await canvasToBlob(this.canvas, this.mimeType, this.quality);
+            download(blob, filename ?? this.getFilename(this.extension));
         });
     }
 
     download(filename?: string) {
-        this.plugin.runTask(this.downloadTask(filename));
+        return this.plugin.runTask(this.downloadTask(filename), { useOverlay: true });
     }
 
     constructor(private plugin: PluginContext) {

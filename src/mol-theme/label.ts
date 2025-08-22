@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
@@ -34,7 +34,7 @@ export function lociLabel(loci: Loci, options: Partial<LabelOptions> = {}): stri
             return structureElementStatsLabel(StructureElement.Stats.ofLoci(loci), options);
         case 'bond-loci':
             const bond = loci.bonds[0];
-            return bond ? bondLabel(bond) : '';
+            return bond ? bondLabel(bond, options) : '';
         case 'shape-loci':
             return loci.shape.name;
         case 'group-loci':
@@ -54,8 +54,8 @@ export function lociLabel(loci: Loci, options: Partial<LabelOptions> = {}): stri
                 `Isosurface at ${Volume.IsoValue.toString(loci.isoValue)}`
             ].join(' | ');
         case 'cell-loci':
-            const size = OrderedSet.size(loci.indices);
-            const start = OrderedSet.start(loci.indices);
+            const size = Volume.Cell.getLociSize(loci);
+            const start = OrderedSet.start(loci.elements[0].indices);
             const absVal = Volume.IsoValue.absolute(loci.volume.grid.cells.data[start]);
             const relVal = Volume.IsoValue.toRelative(absVal, loci.volume.grid.stats);
             const label = [
@@ -63,9 +63,24 @@ export function lociLabel(loci: Loci, options: Partial<LabelOptions> = {}): stri
                 `${size === 1 ? `Cell #${start}` : `${size} Cells`}`
             ];
             if (size === 1) {
+                if (loci.volume.instances.length > 1) {
+                    label.push(`Instance #${OrderedSet.start(loci.elements[0].instances) + 1}`);
+                }
                 label.push(`${Volume.IsoValue.toString(absVal)} (${Volume.IsoValue.toString(relVal)})`);
             }
             return label.join(' | ');
+        case 'segment-loci':
+            const segmentCount = Volume.Segment.getLociSize(loci);
+            const segmentLabels = Volume.Segmentation.get(loci.volume)?.labels;
+            const firstSegment = OrderedSet.start(loci.elements[0].segments);
+            if (segmentLabels && segmentCount === 1) {
+                const label = segmentLabels[firstSegment];
+                if (label) return label;
+            }
+            return [
+                `${loci.volume.label || 'Volume'}`,
+                `${segmentCount === 1 ? `Segment ${firstSegment}` : `${segmentCount} Segments`}`
+            ].join(' | ');
     }
 }
 
@@ -90,6 +105,14 @@ export function structureElementStatsLabel(stats: StructureElement.Stats, option
     const o = { ...DefaultLabelOptions, ...options };
     const label = _structureElementStatsLabel(stats, o.countsOnly, o.hidePrefix, o.condensed, o.reverse);
     return o.htmlStyling ? label : stripTags(label);
+}
+
+export function structureElementLociLabelMany(locis: StructureElement.Loci[], options: Partial<LabelOptions> = {}): string {
+    const stats = StructureElement.Stats.create();
+    for (const l of locis) {
+        StructureElement.Stats.add(stats, stats, StructureElement.Stats.ofLoci(l));
+    }
+    return structureElementStatsLabel(stats, options);
 }
 
 function _structureElementStatsLabel(stats: StructureElement.Stats, countsOnly = false, hidePrefix = false, condensed = false, reverse = false): string {
@@ -216,7 +239,7 @@ function _elementLabel(location: StructureElement.Location, granularity: LabelGr
         label.push(`<small>${entry}</small>`); // entry
         if (granularity !== 'structure') {
             label.push(`<small>Model ${location.unit.model.modelNum}</small>`); // model
-            label.push(`<small>Instance ${location.unit.conformation.operator.name}</small>`); // instance
+            label.push(`<small>Instance ${location.unit.conformation.operator.instanceId}</small>`); // instance
         }
     }
 
@@ -236,7 +259,7 @@ function _atomicElementLabel(location: StructureElement.Location<Unit.Atomic>, g
 
     const label_asym_id = Props.chain.label_asym_id(location);
     const auth_asym_id = Props.chain.auth_asym_id(location);
-    const has_label_seq_id = location.unit.model.atomicHierarchy.residues.label_seq_id.valueKind(rI) === Column.ValueKind.Present;
+    const has_label_seq_id = location.unit.model.atomicHierarchy.residues.label_seq_id.valueKind(rI) === Column.ValueKinds.Present;
     const label_seq_id = Props.residue.label_seq_id(location);
     const auth_seq_id = Props.residue.auth_seq_id(location);
     const ins_code = Props.residue.pdbx_PDB_ins_code(location);
@@ -244,6 +267,7 @@ function _atomicElementLabel(location: StructureElement.Location<Unit.Atomic>, g
     const atom_id = Props.atom.label_atom_id(location);
     const alt_id = Props.atom.label_alt_id(location);
     const occupancy = Props.atom.occupancy(location);
+    const sourceIndex = Props.atom.sourceIndex(location);
 
     const microHetCompIds = Props.residue.microheterogeneityCompIds(location);
     const compId = granularity === 'residue' && microHetCompIds.length > 1 ?
@@ -252,8 +276,11 @@ function _atomicElementLabel(location: StructureElement.Location<Unit.Atomic>, g
     const label: string[] = [];
 
     switch (granularity) {
-        case 'element':
-            label.push(`<b>${atom_id}</b>${alt_id ? `%${alt_id}` : ''}`);
+        case 'element': {
+            const base = `<b>${atom_id}</b>${alt_id ? `%${alt_id}` : ''}`;
+            const idx = `<small style='margin-left: 4px'>[idx <b>${sourceIndex + 1}</b>]</small>`;
+            label.push(`${base}${idx}`);
+        }
         case 'conformation':
             if (granularity === 'conformation' && alt_id) {
                 label.push(`<small>Conformation</small> <b>${alt_id}</b>`);

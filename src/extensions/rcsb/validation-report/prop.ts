@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2020-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -85,14 +85,14 @@ namespace ValidationReport {
         Clashes = 'rcsb-clashes',
     }
 
-    export const DefaultBaseUrl = '//ftp.rcsb.org/pub/pdb/validation_reports';
+    export const DefaultBaseUrl = 'https://files.rcsb.org/pub/pdb/validation_reports';
     export function getEntryUrl(pdbId: string, baseUrl: string) {
         const id = pdbId.toLowerCase();
         return `${baseUrl}/${id.substr(1, 2)}/${id}/${id}_validation.xml.gz`;
     }
 
     export function isApplicable(model?: Model): boolean {
-        return !!model && Model.isFromPdbArchive(model);
+        return !!model && Model.hasPdbId(model) && !Model.isIntegrative(model);
     }
 
     export function fromXml(xml: XMLDocument, model: Model): ValidationReport {

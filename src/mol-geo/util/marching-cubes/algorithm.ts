@@ -10,7 +10,7 @@ import { Tensor } from '../../../mol-math/linear-algebra';
 import { Mesh } from '../../geometry/mesh/mesh';
 import { Index, EdgeIdInfo, CubeEdges, EdgeTable, TriTable } from './tables';
 import { defaults } from '../../../mol-util';
-import { MarchinCubesBuilder, MarchinCubesMeshBuilder, MarchinCubesLinesBuilder } from './builder';
+import { MarchingCubesBuilder, MarchingCubesMeshBuilder, MarchingCubesLinesBuilder } from './builder';
 import { Lines } from '../../geometry/lines/lines';
 
 /**
@@ -51,7 +51,7 @@ export function computeMarchingCubesMesh(params: MarchingCubesParams, mesh?: Mes
         const { dX, dY, dZ } = getExtent(inputParams);
         // TODO should it be configurable? Scalar fields can produce meshes with vastly different densities.
         const vertexChunkSize = Math.min(262144, Math.max(dX * dY * dZ / 32, 1024));
-        const builder = MarchinCubesMeshBuilder(vertexChunkSize, mesh);
+        const builder = MarchingCubesMeshBuilder(vertexChunkSize, mesh);
         await (new MarchingCubesComputation(ctx, builder, inputParams)).run();
         return builder.get();
     });
@@ -63,7 +63,7 @@ export function computeMarchingCubesLines(params: MarchingCubesParams, lines?: L
         const { dX, dY, dZ } = getExtent(inputParams);
         // TODO should it be configurable? Scalar fields can produce meshes with vastly different densities.
         const vertexChunkSize = Math.min(262144, Math.max(dX * dY * dZ / 32, 1024));
-        const builder = MarchinCubesLinesBuilder(vertexChunkSize, lines);
+        const builder = MarchingCubesLinesBuilder(vertexChunkSize, lines);
         await (new MarchingCubesComputation(ctx, builder, inputParams)).run();
         return builder.get();
     });
@@ -72,7 +72,7 @@ export function computeMarchingCubesLines(params: MarchingCubesParams, lines?: L
 class MarchingCubesComputation {
     private size: number;
     private sliceSize: number;
-    private edgeFilter: number
+    private edgeFilter: number;
 
     private minX = 0; private minY = 0; private minZ = 0;
     private maxX = 0; private maxY = 0; private maxZ = 0;
@@ -107,7 +107,7 @@ class MarchingCubesComputation {
         await this.doSlices();
     }
 
-    constructor(private ctx: RuntimeContext, builder: MarchinCubesBuilder<any>, params: MarchingCubesInputParams) {
+    constructor(private ctx: RuntimeContext, builder: MarchingCubesBuilder<any>, params: MarchingCubesInputParams) {
         this.state = new MarchingCubesState(builder, params);
         this.minX = params.bottomLeft[0];
         this.minY = params.bottomLeft[1];
@@ -190,7 +190,7 @@ class MarchingCubesState {
         // TODO make calculation optional
         const n0x = sfg(sf, Math.max(0, li - 1), lj, lk) - sfg(sf, Math.min(this.nX - 1, li + 1), lj, lk);
         const n0y = sfg(sf, li, Math.max(0, lj - 1), lk) - sfg(sf, li, Math.min(this.nY - 1, lj + 1), lk);
-        const n0z = sfg(sf, li, lj, Math.max(0, lk - 1)) - sfg(sf, li, lj, Math.min(this.nZ, lk + 1));
+        const n0z = sfg(sf, li, lj, Math.max(0, lk - 1)) - sfg(sf, li, lj, Math.min(this.nZ - 1, lk + 1));
 
         const n1x = sfg(sf, Math.max(0, hi - 1), hj, hk) - sfg(sf, Math.min(this.nX - 1, hi + 1), hj, hk);
         const n1y = sfg(sf, hi, Math.max(0, hj - 1), hk) - sfg(sf, hi, Math.min(this.nY - 1, hj + 1), hk);
@@ -210,7 +210,7 @@ class MarchingCubesState {
         return id;
     }
 
-    constructor(private builder: MarchinCubesBuilder<any>, params: MarchingCubesInputParams) {
+    constructor(private builder: MarchingCubesBuilder<any>, params: MarchingCubesInputParams) {
         const dims = params.scalarField.space.dimensions;
         this.nX = dims[0]; this.nY = dims[1]; this.nZ = dims[2];
         this.isoLevel = params.isoLevel;

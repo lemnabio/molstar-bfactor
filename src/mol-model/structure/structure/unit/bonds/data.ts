@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -12,15 +12,26 @@ import { StructureElement } from '../../element';
 import { Bond } from '../bonds';
 import { InterUnitGraph } from '../../../../../mol-math/graph/inter-unit-graph';
 
-type IntraUnitBonds = IntAdjacencyGraph<StructureElement.UnitIndex, { readonly order: ArrayLike<number>, readonly flags: ArrayLike<BondType.Flag> }, { readonly canRemap?: boolean }>
-
-namespace IntraUnitBonds {
-    export const Empty: IntraUnitBonds = IntAdjacencyGraph.create([], [], [], 0, { flags: [], order: [] });
+export type IntraUnitBondProps = {
+    /** Can remap even with `dynamicBonds` on, e.g., for water molecules */
+    readonly canRemap?: boolean
+    /** Can be cached in `ElementSetIntraBondCache` */
+    readonly cacheable?: boolean
 }
 
-type InterUnitEdgeProps = { readonly order: number, readonly flag: BondType.Flag }
+export type IntraUnitBonds = IntAdjacencyGraph<StructureElement.UnitIndex, {
+    readonly order: ArrayLike<number>,
+    readonly flags: ArrayLike<BondType.Flag>
+    readonly key: ArrayLike<number>,
+}, IntraUnitBondProps>
 
-class InterUnitBonds extends InterUnitGraph<number, StructureElement.UnitIndex, InterUnitEdgeProps> {
+export namespace IntraUnitBonds {
+    export const Empty: IntraUnitBonds = IntAdjacencyGraph.create([], [], [], 0, { flags: [], order: [], key: [] });
+}
+
+export type InterUnitEdgeProps = { readonly order: number, readonly flag: BondType.Flag, readonly key: number }
+
+export class InterUnitBonds extends InterUnitGraph<number, StructureElement.UnitIndex, InterUnitEdgeProps> {
     /** Get inter-unit bond given a bond-location */
     getBondFromLocation(l: Bond.Location) {
         return Unit.isAtomic(l.aUnit) && Unit.isAtomic(l.bUnit) ? this.getEdge(l.aIndex, l.aUnit.id, l.bIndex, l.bUnit.id) : undefined;
@@ -32,9 +43,7 @@ class InterUnitBonds extends InterUnitGraph<number, StructureElement.UnitIndex, 
     }
 }
 
-namespace InterUnitBonds {
+export namespace InterUnitBonds {
     export class UnitPairBonds extends InterUnitGraph.UnitPairEdges<number, StructureElement.UnitIndex, InterUnitEdgeProps> {}
     export type BondInfo = InterUnitGraph.EdgeInfo<StructureElement.UnitIndex, InterUnitEdgeProps>
 }
-
-export { IntraUnitBonds, InterUnitBonds, InterUnitEdgeProps };

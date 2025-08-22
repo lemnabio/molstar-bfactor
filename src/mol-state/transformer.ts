@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  */
@@ -170,7 +170,7 @@ namespace Transformer {
         const id = `${namespace}.${name}` as Id;
 
         if (registry.has(id)) {
-            throw new Error(`A transform with id '${name}' is already registered. Please pick a unique identifier for your transforms and/or register them only once. This is to ensure that transforms can be serialized and replayed.`);
+            console.warn(`A transform with id '${name}' is already registered. Please pick a unique identifier for your transforms and/or register them only once. This is to ensure that transforms can be serialized and replayed.`);
         }
 
         const t: Transformer<A, B, P> = {
@@ -196,7 +196,7 @@ namespace Transformer {
     }
 
     export namespace Builder {
-        export interface Type<A extends StateObject.Ctor, B extends StateObject.Ctor, P extends { }> {
+        export interface Type<A extends StateObject.Ctor, B extends StateObject.Ctor, P extends {}> {
             name: string,
             from: A | A[],
             to: B | B[],
@@ -210,7 +210,7 @@ namespace Transformer {
             <A extends StateObject.Ctor, B extends StateObject.Ctor, P extends { }>(info: Type<A, B, P>): Define<StateObject.From<A>, StateObject.From<B>, PD.Normalize<P>>
         }
 
-        export interface Define<A extends StateObject, B extends StateObject, P> {
+        export interface Define<A extends StateObject, B extends StateObject, P extends {}> {
             (def: DefinitionBase<A, B, P>): Transformer<A, B, P>
         }
 

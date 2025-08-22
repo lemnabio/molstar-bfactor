@@ -1,24 +1,28 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Gianluca Tomasello <giagitom@gmail.com>
  */
 
-import { createAttributeBuffers, ElementsBuffer, AttributeKind } from './buffer';
-import { createTextures, Texture, Textures } from './texture';
-import { WebGLContext, checkError } from './context';
+import { createAttributeBuffers, ElementsBuffer, AttributeKind, AttributeBuffers } from './buffer';
+import { createTextures, Texture } from './texture';
+import { WebGLContext } from './context';
 import { ShaderCode, DefineValues } from '../shader-code';
-import { Program } from './program';
+import { Program, Programs } from './program';
 import { RenderableSchema, RenderableValues, AttributeSpec, getValueVersions, splitValues, DefineSpec } from '../renderable/schema';
 import { idFactory } from '../../mol-util/id-factory';
 import { ValueCell } from '../../mol-util';
 import { TextureImage, TextureVolume } from '../../mol-gl/renderable/util';
-import { checkFramebufferStatus } from './framebuffer';
-import { isDebugMode } from '../../mol-util/debug';
+import { isDebugMode, isTimingMode } from '../../mol-util/debug';
 import { VertexArray } from './vertex-array';
 import { fillSerial } from '../../mol-util/array';
 import { deepClone } from '../../mol-util/object';
-import { cloneUniformValues } from './uniform';
+import { cloneUniformValues, UniformsList } from './uniform';
+
+// Handle Firefox's preference [webgl.max-vert-ids-per-draw] which defaults to 30_000_000
+// since FF119, see https://bugzilla.mozilla.org/show_bug.cgi?id=1849433
+const MaxDrawCount = 30_000_000;
 
 const getNextRenderItemId = idFactory();
 
@@ -37,25 +41,40 @@ export function getDrawMode(ctx: WebGLContext, drawMode: DrawMode) {
     }
 }
 
+export type MultiDrawBaseData = {
+    /** Only used for `multiDrawArraysInstancedBaseInstance` */
+    firsts: Int32Array
+    counts: Int32Array
+    /** Only used for `multiDrawElementsInstancedBaseVertexBaseInstance` */
+    offsets: Int32Array
+    instanceCounts: Int32Array
+    /** Only used for `multiDrawElementsInstancedBaseVertexBaseInstance` */
+    baseVertices: Int32Array
+    baseInstances: Uint32Array
+    count: number
+    uniforms: UniformsList
+}
+
 export interface RenderItem<T extends string> {
     readonly id: number
     readonly materialId: number
     getProgram: (variant: T) => Program
+    setTransparency: (transparency: Transparency) => void
 
-    render: (variant: T, sharedTexturesList?: Textures) => void
-    update: () => Readonly<ValueChanges>
+    render: (variant: T, sharedTexturesCount: number, mdbDataList?: MultiDrawBaseData[]) => void
+    update: () => void
     destroy: () => void
 }
 
 //
 
-const GraphicsRenderVariant = { 'colorBlended': '', 'colorWboit': '', 'pickObject': '', 'pickInstance': '', 'pickGroup': '', 'depth': '', 'markingDepth': '', 'markingMask': '' };
+const GraphicsRenderVariant = { color: '', pick: '', depth: '', marking: '', emissive: '', tracing: '' };
 export type GraphicsRenderVariant = keyof typeof GraphicsRenderVariant
-const GraphicsRenderVariants = Object.keys(GraphicsRenderVariant) as GraphicsRenderVariant[];
+export const GraphicsRenderVariants = Object.keys(GraphicsRenderVariant) as GraphicsRenderVariant[];
 
-const ComputeRenderVariant = { 'compute': '' };
+const ComputeRenderVariant = { compute: '' };
 export type ComputeRenderVariant = keyof typeof ComputeRenderVariant
-const ComputeRenderVariants = Object.keys(ComputeRenderVariant) as ComputeRenderVariant[];
+export const ComputeRenderVariants = Object.keys(ComputeRenderVariant) as ComputeRenderVariant[];
 
 function createProgramVariant(ctx: WebGLContext, variant: string, defineValues: DefineValues, shaderCode: ShaderCode, schema: RenderableSchema) {
     defineValues = { ...defineValues, dRenderVariant: ValueCell.create(variant) };
@@ -67,15 +86,6 @@ function createProgramVariant(ctx: WebGLContext, variant: string, defineValues: 
 
 //
 
-type ProgramVariants = { [k: string]: Program }
-type VertexArrayVariants = { [k: string]: VertexArray | null }
-
-interface ValueChanges {
-    attributes: boolean
-    defines: boolean
-    elements: boolean
-    textures: boolean
-}
 function createValueChanges() {
     return {
         attributes: false,
@@ -84,6 +94,8 @@ function createValueChanges() {
         textures: false,
     };
 }
+type ValueChanges = ReturnType<typeof createValueChanges>
+
 function resetValueChanges(valueChanges: ValueChanges) {
     valueChanges.attributes = false;
     valueChanges.defines = false;
@@ -93,14 +105,27 @@ function resetValueChanges(valueChanges: ValueChanges) {
 
 //
 
+export type Transparency = 'blended' | 'wboit' | 'dpoit' | undefined
+
+function getRenderVariant(variant: string, transparency: Transparency): string {
+    if (variant === 'color') {
+        switch (transparency) {
+            case 'blended': return 'colorBlended';
+            case 'wboit': return 'colorWboit';
+            case 'dpoit': return 'colorDpoit';
+        }
+    }
+    return variant;
+}
+
 export type GraphicsRenderItem = RenderItem<GraphicsRenderVariant>
-export function createGraphicsRenderItem(ctx: WebGLContext, drawMode: DrawMode, shaderCode: ShaderCode, schema: RenderableSchema, values: RenderableValues, materialId: number) {
-    return createRenderItem(ctx, drawMode, shaderCode, schema, values, materialId, GraphicsRenderVariants);
+export function createGraphicsRenderItem(ctx: WebGLContext, drawMode: DrawMode, shaderCode: ShaderCode, schema: RenderableSchema, values: RenderableValues, materialId: number, transparency: Transparency) {
+    return createRenderItem(ctx, drawMode, shaderCode, schema, values, materialId, GraphicsRenderVariants, transparency);
 }
 
 export type ComputeRenderItem = RenderItem<ComputeRenderVariant>
 export function createComputeRenderItem(ctx: WebGLContext, drawMode: DrawMode, shaderCode: ShaderCode, schema: RenderableSchema, values: RenderableValues, materialId = -1) {
-    return createRenderItem(ctx, drawMode, shaderCode, schema, values, materialId, ComputeRenderVariants);
+    return createRenderItem(ctx, drawMode, shaderCode, schema, values, materialId, ComputeRenderVariants, undefined);
 }
 
 /**
@@ -108,24 +133,25 @@ export function createComputeRenderItem(ctx: WebGLContext, drawMode: DrawMode, s
  *
  * - assumes that `values.drawCount` and `values.instanceCount` exist
  */
-export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: DrawMode, shaderCode: ShaderCode, schema: RenderableSchema, values: RenderableValues, materialId: number, renderVariants: T[]): RenderItem<T> {
+export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: DrawMode, shaderCode: ShaderCode, schema: RenderableSchema, values: RenderableValues, materialId: number, renderVariants: T[], transparency: Transparency): RenderItem<T> {
     const id = getNextRenderItemId();
     const { stats, state, resources } = ctx;
-    const { instancedArrays, vertexArrayObject } = ctx.extensions;
+    const { instancedArrays, vertexArrayObject, multiDrawInstancedBaseVertexBaseInstance, drawInstancedBaseVertexBaseInstance } = ctx.extensions;
+
+    // filter out unsupported variants
+    renderVariants = renderVariants.filter(v => {
+        if (v === 'tracing') return !!ctx.extensions.drawBuffers;
+        return true;
+    });
 
     // emulate gl_VertexID when needed
-    // if (!ctx.isWebGL2 && values.uVertexCount) {
-    // not using gl_VertexID in WebGL2 but aVertex to ensure there is an active attribute with divisor 0
-    // since FF 85 this is not needed anymore but lets keep it for backwards compatibility
-    // https://bugzilla.mozilla.org/show_bug.cgi?id=1679693
-    // see also note in src/mol-gl/shader/chunks/common-vert-params.glsl.ts
-    if (values.uVertexCount) {
+    if (values.uVertexCount && !ctx.extensions.noNonInstancedActiveAttribs) {
         const vertexCount = values.uVertexCount.ref.value;
         (values as any).aVertex = ValueCell.create(fillSerial(new Float32Array(vertexCount)));
         (schema as any).aVertex = AttributeSpec('float32', 1, 0);
     }
 
-    const { attributeValues, defineValues, textureValues, uniformValues, materialUniformValues, bufferedUniformValues } = splitValues(schema, values);
+    const { attributeValues, defineValues, textureValues, materialTextureValues, uniformValues, materialUniformValues, bufferedUniformValues } = splitValues(schema, values);
 
     const uniformValueEntries = Object.entries(uniformValues);
     const materialUniformValueEntries = Object.entries(materialUniformValues);
@@ -137,13 +163,19 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
 
     const glDrawMode = getDrawMode(ctx, drawMode);
 
-    const programs: ProgramVariants = {};
-    for (const k of renderVariants) {
-        programs[k] = createProgramVariant(ctx, k, defineValues, shaderCode, schema);
+    const programs: Programs = {};
+    for (const rv of renderVariants) {
+        programs[rv] = createProgramVariant(ctx, getRenderVariant(rv, transparency), defineValues, shaderCode, schema);
     }
 
     const textures = createTextures(ctx, schema, textureValues);
+    const materialTextures = createTextures(ctx, schema, materialTextureValues);
     const attributeBuffers = createAttributeBuffers(ctx, schema, attributeValues);
+    const instanceBuffers: AttributeBuffers = [];
+    for (let i = 0, il = attributeBuffers.length; i < il; ++i) {
+        const ab = attributeBuffers[i];
+        if (ab[1].divisor === 1) instanceBuffers.push(ab);
+    }
 
     let elementsBuffer: ElementsBuffer | undefined;
     const elements = values.elements;
@@ -151,13 +183,13 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
         elementsBuffer = resources.elements(elements.ref.value);
     }
 
-    const vertexArrays: VertexArrayVariants = {};
+    const vertexArrays: Record<string, VertexArray | null> = {};
     for (const k of renderVariants) {
         vertexArrays[k] = vertexArrayObject ? resources.vertexArray(programs[k], attributeBuffers, elementsBuffer) : null;
     }
 
-    let drawCount = values.drawCount.ref.value;
-    let instanceCount = values.instanceCount.ref.value;
+    let drawCount: number = values.drawCount.ref.value;
+    let instanceCount: number = values.instanceCount.ref.value;
 
     stats.drawCount += drawCount;
     stats.instanceCount += instanceCount;
@@ -172,18 +204,23 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
         id,
         materialId,
         getProgram: (variant: T) => programs[variant],
+        setTransparency: (value: Transparency) => {
+            if (value === transparency) return;
 
-        render: (variant: T, sharedTexturesList?: Textures) => {
-            if (drawCount === 0 || instanceCount === 0 || ctx.isContextLost) return;
+            transparency = value;
+            for (const rv of renderVariants) {
+                programs[rv].destroy();
+                programs[rv] = createProgramVariant(ctx, getRenderVariant(rv, transparency), defineValues, shaderCode, schema);
+            }
+        },
+
+        render: (variant: T, sharedTexturesCount: number, mdbDataList?: MultiDrawBaseData[]) => {
+            if (drawCount === 0 || instanceCount === 0) return;
+
             const program = programs[variant];
             if (program.id === currentProgramId && state.currentRenderItemId === id) {
                 program.setUniforms(uniformValueEntries);
-                if (sharedTexturesList && sharedTexturesList.length > 0) {
-                    program.bindTextures(sharedTexturesList, 0);
-                    program.bindTextures(textures, sharedTexturesList.length);
-                } else {
-                    program.bindTextures(textures, 0);
-                }
+                program.bindTextures(textures, sharedTexturesCount);
             } else {
                 const vertexArray = vertexArrays[variant];
                 if (program.id !== state.currentProgramId || program.id !== currentProgramId ||
@@ -192,17 +229,13 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
                     // console.log('program.id changed or materialId changed/-1', materialId)
                     if (program.id !== state.currentProgramId) program.use();
                     program.setUniforms(materialUniformValueEntries);
+                    program.bindTextures(materialTextures, sharedTexturesCount + textures.length);
                     state.currentMaterialId = materialId;
                     currentProgramId = program.id;
                 }
                 program.setUniforms(uniformValueEntries);
                 program.setUniforms(frontBufferUniformValueEntries);
-                if (sharedTexturesList && sharedTexturesList.length > 0) {
-                    program.bindTextures(sharedTexturesList, 0);
-                    program.bindTextures(textures, sharedTexturesList.length);
-                } else {
-                    program.bindTextures(textures, 0);
-                }
+                program.bindTextures(textures, sharedTexturesCount);
                 if (vertexArray) {
                     vertexArray.bind();
                     // need to bind elements buffer explicitly since it is not always recorded in the VAO
@@ -214,23 +247,87 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
                 state.currentRenderItemId = id;
             }
             if (isDebugMode) {
-                try {
-                    checkFramebufferStatus(ctx.gl);
-                } catch (e) {
-                    throw new Error(`Framebuffer error rendering item id ${id}: '${e}'`);
-                }
+                ctx.checkFramebufferStatus(`Framebuffer error rendering item id ${id}`);
             }
-            if (elementsBuffer) {
-                instancedArrays.drawElementsInstanced(glDrawMode, drawCount, elementsBuffer._dataType, 0, instanceCount);
+            if (mdbDataList) {
+                for (const mdbData of mdbDataList) {
+                    if (mdbData.count === 0) continue;
+
+                    program.setUniforms(mdbData.uniforms);
+                    // console.log(mdbData.uniforms)
+                    if (multiDrawInstancedBaseVertexBaseInstance) {
+                        if (elementsBuffer) {
+                            multiDrawInstancedBaseVertexBaseInstance.multiDrawElementsInstancedBaseVertexBaseInstance(glDrawMode, mdbData.counts, 0, elementsBuffer._dataType, mdbData.offsets, 0, mdbData.instanceCounts, 0, mdbData.baseVertices, 0, mdbData.baseInstances, 0, mdbData.count);
+                        } else {
+                            multiDrawInstancedBaseVertexBaseInstance.multiDrawArraysInstancedBaseInstance(glDrawMode, mdbData.firsts, 0, mdbData.counts, 0, mdbData.instanceCounts, 0, mdbData.baseInstances, 0, mdbData.count);
+                        }
+                    } else if (drawInstancedBaseVertexBaseInstance) {
+                        if (elementsBuffer) {
+                            for (let i = 0; i < mdbData.count; ++i) {
+                                if (mdbData.counts[i] > 0) {
+                                    program.uniform('uDrawId', i);
+                                    drawInstancedBaseVertexBaseInstance.drawElementsInstancedBaseVertexBaseInstance(glDrawMode, mdbData.counts[i], elementsBuffer._dataType, mdbData.offsets[i], mdbData.instanceCounts[i], mdbData.baseVertices[i], mdbData.baseInstances[i]);
+                                }
+                            }
+                        } else {
+                            for (let i = 0; i < mdbData.count; ++i) {
+                                if (mdbData.counts[i] > 0) {
+                                    program.uniform('uDrawId', i);
+                                    drawInstancedBaseVertexBaseInstance.drawArraysInstancedBaseInstance(glDrawMode, mdbData.firsts[i], mdbData.counts[i], mdbData.instanceCounts[i], mdbData.baseInstances[i]);
+                                }
+                            }
+                        }
+                    } else {
+                        if (elementsBuffer) {
+                            for (let i = 0; i < mdbData.count; ++i) {
+                                if (mdbData.counts[i] > 0) {
+                                    program.uniform('uDrawId', i);
+                                    program.offsetAttributes(instanceBuffers, mdbData.baseInstances[i]);
+                                    instancedArrays.drawElementsInstanced(glDrawMode, mdbData.counts[i], elementsBuffer._dataType, mdbData.offsets[i], mdbData.instanceCounts[i]);
+                                }
+                            }
+                        } else {
+                            for (let i = 0; i < mdbData.count; ++i) {
+                                if (mdbData.counts[i] > 0) {
+                                    program.uniform('uDrawId', i);
+                                    program.offsetAttributes(instanceBuffers, mdbData.baseInstances[i]);
+                                    instancedArrays.drawArraysInstanced(glDrawMode, 0, mdbData.counts[i], mdbData.instanceCounts[i]);
+                                }
+                            }
+                        }
+                    }
+                    if (isTimingMode) {
+                        if (multiDrawInstancedBaseVertexBaseInstance) {
+                            stats.calls.multiDrawInstancedBase += 1;
+                        } else if (drawInstancedBaseVertexBaseInstance) {
+                            stats.calls.drawInstancedBase += mdbData.count;
+                        } else {
+                            stats.calls.drawInstanced += mdbData.count;
+                        }
+                        for (let i = 0; i < mdbData.count; ++i) {
+                            stats.calls.counts += mdbData.instanceCounts[i];
+                        }
+                    }
+                }
             } else {
-                instancedArrays.drawArraysInstanced(glDrawMode, 0, drawCount, instanceCount);
+                let offset = 0;
+                while (true) {
+                    const count = Math.min(drawCount - offset, MaxDrawCount);
+                    if (elementsBuffer) {
+                        instancedArrays.drawElementsInstanced(glDrawMode, count, elementsBuffer._dataType, offset * elementsBuffer._bpe, instanceCount);
+                    } else {
+                        instancedArrays.drawArraysInstanced(glDrawMode, offset, count, instanceCount);
+                    }
+                    offset += count;
+                    if (offset >= drawCount) break;
+                }
+                if (isTimingMode) {
+                    stats.calls.drawInstanced += 1;
+                    stats.calls.counts += instanceCount;
+                }
             }
             if (isDebugMode) {
-                try {
-                    checkError(ctx.gl);
-                } catch (e) {
-                    throw new Error(`Draw error rendering item id ${id}: '${e}'`);
-                }
+                ctx.checkError(`Draw error rendering item id ${id}`);
             }
         },
         update: () => {
@@ -254,9 +351,9 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
 
             if (valueChanges.defines) {
                 // console.log('some defines changed, need to rebuild programs');
-                for (const k of renderVariants) {
-                    programs[k].destroy();
-                    programs[k] = createProgramVariant(ctx, k, defineValues, shaderCode, schema);
+                for (const rv of renderVariants) {
+                    programs[rv].destroy();
+                    programs[rv] = createProgramVariant(ctx, getRenderVariant(rv, transparency), defineValues, shaderCode, schema);
                 }
             }
 
@@ -331,6 +428,22 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
                 }
             }
 
+            for (let i = 0, il = materialTextures.length; i < il; ++i) {
+                const [k, texture] = materialTextures[i];
+                const value = materialTextureValues[k];
+                if (value.ref.version !== versions[k]) {
+                    // update of textures with kind 'texture' is done externally
+                    if (schema[k].kind !== 'texture') {
+                        // console.log('materialTexture version changed, uploading image', k);
+                        texture.load(value.ref.value as TextureImage<any> | TextureVolume<any>);
+                        valueChanges.textures = true;
+                    } else {
+                        materialTextures[i][1] = value.ref.value as Texture;
+                    }
+                    versions[k] = value.ref.version;
+                }
+            }
+
             for (let i = 0, il = backBufferUniformValueEntries.length; i < il; ++i) {
                 const [k, uniform] = backBufferUniformValueEntries[i];
                 if (uniform.ref.version !== versions[k]) {
@@ -339,8 +452,6 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
                     versions[k] = uniform.ref.version;
                 }
             }
-
-            return valueChanges;
         },
         destroy: () => {
             if (!destroyed) {
@@ -351,9 +462,11 @@ export function createRenderItem<T extends string>(ctx: WebGLContext, drawMode: 
                 }
                 textures.forEach(([k, texture]) => {
                     // lifetime of textures with kind 'texture' is defined externally
-                    if (schema[k].kind !== 'texture') {
-                        texture.destroy();
-                    }
+                    if (schema[k].kind !== 'texture') texture.destroy();
+                });
+                materialTextures.forEach(([k, texture]) => {
+                    // lifetime of textures with kind 'texture' is defined externally
+                    if (schema[k].kind !== 'texture') texture.destroy();
                 });
                 attributeBuffers.forEach(([_, buffer]) => buffer.destroy());
                 if (elementsBuffer) elementsBuffer.destroy();

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -16,6 +16,7 @@ import { ElementIndex, ChainIndex } from '../../../mol-model/structure/model/ind
 import { getCoarseRanges } from '../../../mol-model/structure/model/properties/utils/coarse-ranges';
 import { IhmSphereObjSite, IhmGaussianObjSite, AtomSite, BasicSchema } from './schema';
 import { Model } from '../../../mol-model/structure';
+import { getCoarseIndex } from '../../../mol-model/structure/model/properties/utils/coarse-index';
 
 export interface CoarseData {
     model_id: number,
@@ -30,7 +31,7 @@ export interface CoarseData {
 
 export const EmptyCoarse = { hierarchy: CoarseHierarchy.Empty, conformation: void 0 as any };
 
-export function getCoarse(data: CoarseData, properties: Model['properties']): { hierarchy: CoarseHierarchy, conformation: CoarseConformation } {
+export function getCoarse(data: CoarseData, chemicalComponentMap: Model['properties']['chemicalComponentMap']): { hierarchy: CoarseHierarchy, conformation: CoarseConformation } {
     const { ihm_sphere_obj_site, ihm_gaussian_obj_site } = data;
 
     if (ihm_sphere_obj_site._rowCount === 0 && ihm_gaussian_obj_site._rowCount === 0) return EmptyCoarse;
@@ -38,18 +39,19 @@ export function getCoarse(data: CoarseData, properties: Model['properties']): { 
     const sphereData = getData(ihm_sphere_obj_site);
     const sphereConformation = getSphereConformation(ihm_sphere_obj_site);
     const sphereKeys = getCoarseKeys(sphereData, data.entities);
-    const sphereRanges = getCoarseRanges(sphereData, properties.chemicalComponentMap);
+    const sphereRanges = getCoarseRanges(sphereData, chemicalComponentMap);
 
     const gaussianData = getData(ihm_gaussian_obj_site);
     const gaussianConformation = getGaussianConformation(ihm_gaussian_obj_site);
     const gaussianKeys = getCoarseKeys(gaussianData, data.entities);
-    const gaussianRanges = getCoarseRanges(gaussianData, properties.chemicalComponentMap);
+    const gaussianRanges = getCoarseRanges(gaussianData, chemicalComponentMap);
 
     return {
         hierarchy: {
             isDefined: true,
             spheres: { ...sphereData, ...sphereKeys, ...sphereRanges },
             gaussians: { ...gaussianData, ...gaussianKeys, ...gaussianRanges },
+            index: getCoarseIndex({ spheres: sphereData, gaussians: gaussianData })
         },
         conformation: {
             id: UUID.create22(),

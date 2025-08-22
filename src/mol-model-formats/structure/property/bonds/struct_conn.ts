@@ -1,8 +1,9 @@
 /**
- * Copyright (c) 2017-2021 Mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2017-2025 Mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
+ * @author Yakov Pechersky <ffxen158@gmail.com>
  */
 
 import { Model } from '../../../../mol-model/structure/model/model';
@@ -20,6 +21,8 @@ import { FormatPropertyProvider } from '../../common/property';
 export interface StructConn {
     readonly data: Table<mmCIF_Schema['struct_conn']>
     readonly byAtomIndex: Map<ElementIndex, ReadonlyArray<StructConn.Entry>>
+    /** Cantor pairs of residue indices that have a struct-conn record */
+    readonly residueCantorPairs: Set<number>
     readonly entries: ReadonlyArray<StructConn.Entry>
 }
 
@@ -58,7 +61,7 @@ export namespace StructConn {
      */
     export function isExhaustive(model: Model): boolean {
         const structConn = StructConn.Provider.get(model);
-        return !!structConn && (structConn.data.id.rowCount / model.atomicConformation.atomId.rowCount) > 0.95;
+        return !!structConn && (structConn.entries.length / model.atomicConformation.atomId.rowCount) > 0.95;
     }
 
     function hasAtom({ units }: Structure, element: ElementIndex) {
@@ -111,24 +114,33 @@ export namespace StructConn {
             symmetry: struct_conn.ptnr2_symmetry
         };
 
+        const entityIds = Array.from(model.entities.data.id.toArray());
         const _p = (row: number, ps: typeof p1) => {
-            if (ps.label_asym_id.valueKind(row) !== Column.ValueKind.Present) return void 0;
+            if (ps.label_asym_id.valueKind(row) !== Column.ValueKinds.Present) return void 0;
             const asymId = ps.label_asym_id.value(row);
-            const entityIndex = model.atomicHierarchy.index.findEntity(asymId);
-            if (entityIndex < 0) return void 0;
-            const residueIndex = model.atomicHierarchy.index.findResidue(
-                model.entities.data.id.value(entityIndex),
-                asymId,
-                ps.auth_seq_id.value(row),
-                ps.ins_code.value(row)
-            );
-            if (residueIndex < 0) return void 0;
             const atomName = ps.label_atom_id.value(row);
             // turns out "mismat" records might not have atom name value
-            if (!atomName) return void 0;
-            const atomIndex = model.atomicHierarchy.index.findAtomOnResidue(residueIndex, atomName, ps.label_alt_id.value(row));
-            if (atomIndex < 0) return void 0;
-            return { residueIndex, atomIndex, symmetry: ps.symmetry.value(row) };
+            if (!atomName) return undefined;
+
+            // prefer auth_seq_id, but if it is absent, then fall back to label_seq_id
+            const resId = (ps.auth_seq_id.valueKind(row) === Column.ValueKind.Present) ?
+                ps.auth_seq_id.value(row) :
+                ps.label_seq_id.value(row);
+            const resInsCode = ps.ins_code.value(row);
+            const altId = ps.label_alt_id.value(row);
+            for (const eId of entityIds) {
+                const residueIndex = model.atomicHierarchy.index.findResidue(
+                    eId,
+                    asymId,
+                    resId,
+                    resInsCode
+                );
+                if (residueIndex < 0) continue;
+                const atomIndex = model.atomicHierarchy.index.findAtomOnResidue(residueIndex, atomName, altId);
+                if (atomIndex < 0) continue;
+                return { residueIndex, atomIndex, symmetry: ps.symmetry.value(row) };
+            }
+            return void 0;
         };
 
         const entries: StructConn.Entry[] = [];
@@ -138,7 +150,7 @@ export namespace StructConn {
             if (partnerA === undefined || partnerB === undefined) continue;
 
             const type = conn_type_id.value(i);
-            const orderType = (pdbx_value_order.value(i) || '').toLowerCase();
+            const orderType = (pdbx_value_order.value(i) || '');
             let flags = BondType.Flag.None;
             let order = 1;
 

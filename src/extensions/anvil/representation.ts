@@ -43,9 +43,9 @@ export type BilayerPlanesProps = PD.Values<BilayerPlanesParams>
 const BilayerRimsParams = {
     ...Lines.Params,
     ...SharedParams,
-    lineSizeAttenuation: PD.Boolean(true),
-    linesSize: PD.Numeric(0.3, { min: 0.01, max: 50, step: 0.01 }),
-    dashedLines: PD.Boolean(true),
+    lineSizeAttenuation: PD.Boolean(false),
+    linesSize: PD.Numeric(0.5, { min: 0.01, max: 50, step: 0.01 }),
+    dashedLines: PD.Boolean(false),
 };
 export type BilayerRimsParams = typeof BilayerRimsParams
 export type BilayerRimsProps = PD.Values<BilayerRimsParams>
@@ -81,7 +81,7 @@ export const MembraneOrientationRepresentationProvider = StructureRepresentation
     defaultValues: PD.getDefaultValues(MembraneOrientationParams),
     defaultColorTheme: { name: 'shape-group' },
     defaultSizeTheme: { name: 'shape-group' },
-    isApplicable: (structure: Structure) => structure.elementCount > 0,
+    isApplicable(structure: Structure) { return MembraneOrientationProvider.isApplicable(structure); },
     ensureCustomProperties: {
         attach: (ctx: CustomProperty.Context, structure: Structure) => MembraneOrientationProvider.attach(ctx, structure, void 0, true),
         detach: (data) => MembraneOrientationProvider.ref(data, false)

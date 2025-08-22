@@ -100,7 +100,7 @@ async function getModels(db: CifCore_Database, format: CifCoreFormat, ctx: Runti
         const element_symbol = new Array<string>(atomCount);
         for (let i = 0; i < atomCount; ++i) {
             // TODO can take as is if type_symbol not given?
-            element_symbol[i] = guessElementSymbolString(label.value(i));
+            element_symbol[i] = guessElementSymbolString(label.value(i), '');
         }
         typeSymbol = Column.ofStringArray(element_symbol);
         formalCharge = Column.Undefined(atomCount, Column.Schema.int);
@@ -146,13 +146,13 @@ async function getModels(db: CifCore_Database, format: CifCoreFormat, ctx: Runti
     componentBuilder.setNames([['MOL', name || 'Unknown Molecule']]);
     componentBuilder.add('MOL', 0);
 
-    const basics = createBasic({
+    const basic = createBasic({
         entity: entityBuilder.getEntityTable(),
         chem_comp: componentBuilder.getChemCompTable(),
         atom_site
     });
 
-    const models = await createModels(basics, format, ctx);
+    const models = await createModels(basic, format, ctx);
 
     if (models.frameCount > 0) {
         const first = models.representative;

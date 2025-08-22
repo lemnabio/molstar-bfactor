@@ -1,15 +1,17 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Russell Parker <russell@benchling.com>
+ * @author Herman Bergwerf <post@hbergwerf.nl>
  */
 
 import { Subject, Observable } from 'rxjs';
-
+import { Viewport } from '../../mol-canvas3d/camera/util';
 import { Vec2, EPSILON } from '../../mol-math/linear-algebra';
-
 import { BitFlags, noop } from '../../mol-util';
+import { Ray3D } from '../../mol-math/geometry/primitives/ray3d';
 
 export function getButtons(event: MouseEvent | Touch) {
     if (typeof event === 'object') {
@@ -74,10 +76,14 @@ export type ModifiersKeys = {
     meta: boolean
 }
 export namespace ModifiersKeys {
-    export const None = create();
+    export const None: Readonly<ModifiersKeys> = create();
 
     export function areEqual(a: ModifiersKeys, b: ModifiersKeys) {
         return a.shift === b.shift && a.alt === b.alt && a.control === b.control && a.meta === b.meta;
+    }
+
+    export function areNone(a: ModifiersKeys) {
+        return areEqual(a, None);
     }
 
     export function size(a?: ModifiersKeys) {
@@ -106,7 +112,7 @@ export namespace ButtonsType {
     export const has: (btn: ButtonsType, f: Flag) => boolean = BitFlags.has;
     export const create: (fs: Flag) => ButtonsType = BitFlags.create;
 
-    export const enum Flag {
+    export enum Flag {
         /** No button or un-initialized */
         None = 0x0,
         /** Primary button (usually left) */
@@ -122,6 +128,8 @@ export namespace ButtonsType {
     }
 }
 
+export type KeyCode = string
+
 type BaseInput = {
     buttons: ButtonsType
     button: ButtonsType.Flag
@@ -136,6 +144,7 @@ export type DragInput = {
     pageX: number,
     pageY: number,
     isStart: boolean
+    useDelta?: boolean
 } & BaseInput
 
 export type WheelInput = {
@@ -155,6 +164,7 @@ export type ClickInput = {
     y: number,
     pageX: number,
     pageY: number,
+    ray?: Ray3D,
 } & BaseInput
 
 export type MoveInput = {
@@ -162,15 +172,25 @@ export type MoveInput = {
     y: number,
     pageX: number,
     pageY: number,
+    ray?: Ray3D,
+    movementX?: number,
+    movementY?: number,
     inside: boolean,
+    // Move is subscribed to window element
+    // This indicates that the event originated from the element the InputObserver was created on
+    onElement: boolean
 } & BaseInput
 
 export type PinchInput = {
+    isStart: boolean,
+    distance: number,
     delta: number,
     fraction: number,
     fractionDelta: number,
-    distance: number,
-    isStart: boolean
+    startX: number,
+    startY: number,
+    centerPageX: number,
+    centerPageY: number,
 } & BaseInput
 
 export type GestureInput = {
@@ -184,14 +204,32 @@ export type GestureInput = {
 
 export type KeyInput = {
     key: string,
+    code: string,
     modifiers: ModifiersKeys
+    x: number,
+    y: number,
+    pageX: number,
+    pageY: number,
+    /** for overwriting browser shortcuts like `ctrl+s` as needed */
+    preventDefault: () => void
 }
+
+export const EmptyKeyInput: KeyInput = {
+    key: '',
+    code: '',
+    modifiers: ModifiersKeys.None,
+    x: -1,
+    y: -1,
+    pageX: -1,
+    pageY: -1,
+    preventDefault: noop,
+};
 
 export type ResizeInput = {
 
 }
 
-const enum DraggingState {
+enum DraggingState {
     Stopped = 0,
     Started = 1,
     Moving = 2
@@ -202,6 +240,9 @@ type PointerEvent = {
     clientY: number
     pageX: number
     pageY: number
+    movementX?: number
+    movementY?: number
+    target: EventTarget | null
 
     preventDefault?: () => void
 }
@@ -218,6 +259,7 @@ interface InputObserver {
     readonly width: number
     readonly height: number
     readonly pixelRatio: number
+    readonly pointerLock: boolean
 
     readonly drag: Observable<DragInput>,
     // Equivalent to mouseUp and touchEnd
@@ -232,7 +274,14 @@ interface InputObserver {
     readonly resize: Observable<ResizeInput>,
     readonly modifiers: Observable<ModifiersKeys>
     readonly key: Observable<KeyInput>
+    readonly keyUp: Observable<KeyInput>
+    readonly keyDown: Observable<KeyInput>
+    readonly lock: Observable<boolean>
 
+    setPixelScale: (pixelScale: number) => void
+
+    requestPointerLock: (viewport: Viewport) => void
+    exitPointerLock: () => void
     dispose: () => void
 }
 
@@ -250,6 +299,9 @@ function createEvents() {
         enter: new Subject<undefined>(),
         modifiers: new Subject<ModifiersKeys>(),
         key: new Subject<KeyInput>(),
+        keyUp: new Subject<KeyInput>(),
+        keyDown: new Subject<KeyInput>(),
+        lock: new Subject<boolean>(),
     };
 }
 
@@ -261,6 +313,7 @@ namespace InputObserver {
         return {
             noScroll,
             noContextMenu,
+            pointerLock: false,
 
             width: 0,
             height: 0,
@@ -268,6 +321,10 @@ namespace InputObserver {
 
             ...createEvents(),
 
+            setPixelScale: noop,
+
+            requestPointerLock: noop,
+            exitPointerLock: noop,
             dispose: noop
         };
     }
@@ -278,7 +335,9 @@ namespace InputObserver {
         let width = element.clientWidth * pixelRatio();
         let height = element.clientHeight * pixelRatio();
 
-        let lastTouchDistance = 0, lastTouchFraction = 0;
+        let isLocked = false;
+        let lockedViewport = Viewport();
+
         const pointerDown = Vec2();
         const pointerStart = Vec2();
         const pointerEnd = Vec2();
@@ -290,6 +349,12 @@ namespace InputObserver {
             control: false,
             meta: false
         };
+        const position = {
+            x: -1,
+            y: -1,
+            pageX: -1,
+            pageY: -1,
+        };
 
         function pixelRatio() {
             return window.devicePixelRatio * pixelScale;
@@ -299,31 +364,26 @@ namespace InputObserver {
             return { ...modifierKeys };
         }
 
+        function getKeyOnElement(event: Event): boolean {
+            return event.target === document.body || event.target === element;
+        }
+
         let dragging: DraggingState = DraggingState.Stopped;
         let disposed = false;
         let buttons = ButtonsType.create(ButtonsType.Flag.None);
         let button = ButtonsType.Flag.None;
         let isInside = false;
+        let hasMoved = false;
+
+        let resizeObserver: ResizeObserver | undefined;
+        if (typeof window.ResizeObserver !== 'undefined') {
+            resizeObserver = new window.ResizeObserver(onResize);
+        }
 
         const events = createEvents();
-        const { drag, interactionEnd, wheel, pinch, gesture, click, move, leave, enter, resize, modifiers, key } = events;
+        const { drag, interactionEnd, wheel, pinch, gesture, click, move, leave, enter, resize, modifiers, key, keyUp, keyDown, lock } = events;
 
         attach();
-
-        return {
-            get noScroll() { return noScroll; },
-            set noScroll(value: boolean) { noScroll = value; },
-            get noContextMenu() { return noContextMenu; },
-            set noContextMenu(value: boolean) { noContextMenu = value; },
-
-            get width() { return width; },
-            get height() { return height; },
-            get pixelRatio() { return pixelRatio(); },
-
-            ...events,
-
-            dispose
-        };
 
         function attach() {
             element.addEventListener('contextmenu', onContextMenu as any, false);
@@ -335,9 +395,6 @@ namespace InputObserver {
             // mouse move/up events have to be added to a parent, i.e. window
             window.addEventListener('mousemove', onMouseMove as any, false);
             window.addEventListener('mouseup', onMouseUp as any, false);
-
-            element.addEventListener('mouseenter', onMouseEnter as any, false);
-            element.addEventListener('mouseleave', onMouseLeave as any, false);
 
             element.addEventListener('touchstart', onTouchStart as any, false);
             element.addEventListener('touchmove', onTouchMove as any, false);
@@ -353,7 +410,14 @@ namespace InputObserver {
             window.addEventListener('keydown', handleKeyDown as EventListener, false);
             window.addEventListener('keypress', handleKeyPress as EventListener, false);
 
-            window.addEventListener('resize', onResize, false);
+            document.addEventListener('pointerlockchange', onPointerLockChange, false);
+            document.addEventListener('pointerlockerror', onPointerLockError, false);
+
+            if (resizeObserver != null) {
+                resizeObserver.observe(element.parentElement!);
+            } else {
+                window.addEventListener('resize', onResize, false);
+            }
         }
 
         function dispose() {
@@ -366,9 +430,6 @@ namespace InputObserver {
             element.removeEventListener('mousedown', onMouseDown as any, false);
             window.removeEventListener('mousemove', onMouseMove as any, false);
             window.removeEventListener('mouseup', onMouseUp as any, false);
-
-            element.removeEventListener('mouseenter', onMouseEnter as any, false);
-            element.removeEventListener('mouseleave', onMouseLeave as any, false);
 
             element.removeEventListener('touchstart', onTouchStart as any, false);
             element.removeEventListener('touchmove', onTouchMove as any, false);
@@ -383,7 +444,34 @@ namespace InputObserver {
             window.removeEventListener('keydown', handleKeyDown as EventListener, false);
             window.removeEventListener('keypress', handleKeyPress as EventListener, false);
 
-            window.removeEventListener('resize', onResize, false);
+            document.removeEventListener('pointerlockchange', onPointerLockChange, false);
+            document.removeEventListener('pointerlockerror', onPointerLockError, false);
+
+            cross.remove();
+
+            if (resizeObserver != null) {
+                resizeObserver.unobserve(element.parentElement!);
+                resizeObserver.disconnect();
+            } else {
+                window.removeEventListener('resize', onResize, false);
+            }
+        }
+
+        function onPointerLockChange() {
+            if (element.ownerDocument.pointerLockElement === element) {
+                isLocked = true;
+            } else {
+                isLocked = false;
+            }
+            toggleCross(isLocked);
+            lock.next(isLocked);
+        }
+
+        function onPointerLockError() {
+            console.error('Unable to use Pointer Lock API');
+            isLocked = false;
+            toggleCross(isLocked);
+            lock.next(isLocked);
         }
 
         function onContextMenu(event: MouseEvent) {
@@ -416,6 +504,16 @@ namespace InputObserver {
             if (!modifierKeys.meta && event.metaKey) { changed = true; modifierKeys.meta = true; }
 
             if (changed && isInside) modifiers.next(getModifierKeys());
+
+            if (getKeyOnElement(event) && isInside) {
+                keyDown.next({
+                    key: event.key,
+                    code: event.code,
+                    modifiers: getModifierKeys(),
+                    ...position,
+                    preventDefault: () => event.preventDefault(),
+                });
+            }
         }
 
         function handleKeyUp(event: KeyboardEvent) {
@@ -429,12 +527,27 @@ namespace InputObserver {
             if (changed && isInside) modifiers.next(getModifierKeys());
 
             if (AllowedNonPrintableKeys.includes(event.key)) handleKeyPress(event);
+
+            if (getKeyOnElement(event) && isInside) {
+                keyUp.next({
+                    key: event.key,
+                    code: event.code,
+                    modifiers: getModifierKeys(),
+                    ...position,
+                    preventDefault: () => event.preventDefault(),
+                });
+            }
         }
 
         function handleKeyPress(event: KeyboardEvent) {
+            if (!getKeyOnElement(event) || !isInside) return;
+
             key.next({
                 key: event.key,
-                modifiers: getModifierKeys()
+                code: event.code,
+                modifiers: getModifierKeys(),
+                ...position,
+                preventDefault: () => event.preventDefault(),
             });
         }
 
@@ -445,7 +558,8 @@ namespace InputObserver {
                 clientX: (t0.clientX + t1.clientX) / 2,
                 clientY: (t0.clientY + t1.clientY) / 2,
                 pageX: (t0.pageX + t1.pageX) / 2,
-                pageY: (t0.pageY + t1.pageY) / 2
+                pageY: (t0.pageY + t1.pageY) / 2,
+                target: ev.target
             };
         }
 
@@ -455,25 +569,60 @@ namespace InputObserver {
             return Math.sqrt(dx * dx + dy * dy);
         }
 
+        let singleTouchDistance = -1;
+        let lastSingleTouch: Touch | undefined = undefined;
+        const singleTouchPosition = Vec2(), singleTouchTmp = Vec2();
+
+        function updateSingleTouchDistance(ev: TouchEvent) {
+            if (singleTouchDistance < 0) return;
+
+            Vec2.set(singleTouchTmp, ev.touches[0].pageX, ev.touches[0].pageY);
+            singleTouchDistance += Vec2.distance(singleTouchPosition, singleTouchTmp);
+            Vec2.copy(singleTouchPosition, singleTouchTmp);
+        }
+
+        const firstTouchStart = Vec2();
+        let firstTouchStartSet = false;
+        let initialTouchDistance = 0, lastTouchFraction = 1;
+
         function onTouchStart(ev: TouchEvent) {
             ev.preventDefault();
 
+            lastSingleTouch = undefined;
+            singleTouchDistance = -1;
             if (ev.touches.length === 1) {
                 buttons = button = ButtonsType.Flag.Primary;
-                onPointerDown(ev.touches[0]);
-            } else if (ev.touches.length === 2) {
-                buttons = ButtonsType.Flag.Secondary & ButtonsType.Flag.Auxilary;
-                button = ButtonsType.Flag.Secondary;
-                onPointerDown(getCenterTouch(ev));
 
-                const touchDistance = getTouchDistance(ev);
-                lastTouchDistance = touchDistance;
+                singleTouchDistance = 0;
+                Vec2.set(singleTouchPosition, ev.touches[0].pageX, ev.touches[0].pageY);
+                lastSingleTouch = ev.touches[0];
+
+                onPointerDown(ev.touches[0]);
+                Vec2.copy(firstTouchStart, pointerStart);
+                firstTouchStartSet = true;
+            } else if (ev.touches.length === 2) {
+                buttons = ButtonsType.Flag.Secondary | ButtonsType.Flag.Auxilary;
+                button = ButtonsType.Flag.Secondary;
+                updateModifierKeys(ev);
+
+                lastTouchFraction = 1;
+                initialTouchDistance = getTouchDistance(ev);
+                const { pageX: centerPageX, pageY: centerPageY } = getPagePosition(getCenterTouch(ev));
+                if (!firstTouchStartSet) {
+                    eventOffset(firstTouchStart, getCenterTouch(ev));
+                    firstTouchStartSet = true;
+                }
+
                 pinch.next({
-                    distance: touchDistance,
-                    fraction: 1,
-                    fractionDelta: 0,
-                    delta: 0,
                     isStart: true,
+                    distance: initialTouchDistance,
+                    delta: 0,
+                    fraction: lastTouchFraction,
+                    fractionDelta: 0,
+                    startX: firstTouchStart[0],
+                    startY: firstTouchStart[1],
+                    centerPageX,
+                    centerPageY,
                     buttons,
                     button,
                     modifiers: getModifierKeys()
@@ -486,6 +635,19 @@ namespace InputObserver {
 
         function onTouchEnd(ev: TouchEvent) {
             endDrag();
+
+            if (lastSingleTouch && singleTouchDistance <= 4) {
+                const t = lastSingleTouch;
+                if (!mask(t.clientX, t.clientY)) return;
+
+                eventOffset(singleTouchTmp, t);
+                const { pageX, pageY } = getPagePosition(t);
+                const [x, y] = singleTouchTmp;
+
+                click.next({ x, y, pageX, pageY, buttons, button, modifiers: getModifierKeys() });
+            }
+            lastSingleTouch = undefined;
+            firstTouchStartSet = false;
         }
 
         function onTouchMove(ev: TouchEvent) {
@@ -500,32 +662,38 @@ namespace InputObserver {
                 }
             }
 
+            lastSingleTouch = undefined;
             if (ev.touches.length === 1) {
                 buttons = ButtonsType.Flag.Primary;
+                lastSingleTouch = ev.touches[0];
+                updateSingleTouchDistance(ev);
                 onPointerMove(ev.touches[0]);
             } else if (ev.touches.length === 2) {
-                const touchDistance = getTouchDistance(ev);
-                const touchDelta = lastTouchDistance - touchDistance;
-                if (Math.abs(touchDelta) < 4) {
-                    buttons = ButtonsType.Flag.Secondary;
-                    onPointerMove(getCenterTouch(ev));
-                } else {
-                    buttons = ButtonsType.Flag.Auxilary;
-                    updateModifierKeys(ev);
-                    const fraction = lastTouchDistance / touchDistance;
-                    pinch.next({
-                        delta: touchDelta,
-                        fraction,
-                        fractionDelta: lastTouchFraction - fraction,
-                        distance: touchDistance,
-                        isStart: false,
-                        buttons,
-                        button,
-                        modifiers: getModifierKeys()
-                    });
-                    lastTouchFraction = fraction;
-                }
-                lastTouchDistance = touchDistance;
+                buttons = ButtonsType.Flag.Secondary | ButtonsType.Flag.Auxilary;
+                button = ButtonsType.Flag.Secondary;
+                updateModifierKeys(ev);
+
+                const { pageX: centerPageX, pageY: centerPageY } = getPagePosition(getCenterTouch(ev));
+                const distance = getTouchDistance(ev);
+                const delta = initialTouchDistance - distance;
+                const fraction = initialTouchDistance / distance;
+                const fractionDelta = fraction - lastTouchFraction;
+                lastTouchFraction = fraction;
+
+                pinch.next({
+                    isStart: false,
+                    distance,
+                    delta,
+                    fraction,
+                    fractionDelta,
+                    startX: firstTouchStart[0],
+                    startY: firstTouchStart[1],
+                    centerPageX,
+                    centerPageY,
+                    buttons,
+                    button,
+                    modifiers: getModifierKeys()
+                });
             } else if (ev.touches.length === 3) {
                 buttons = ButtonsType.Flag.Forth;
                 onPointerMove(getCenterTouch(ev));
@@ -577,20 +745,35 @@ namespace InputObserver {
             if (!mask(ev.clientX, ev.clientY)) return;
 
             eventOffset(pointerEnd, ev);
-            if (Vec2.distance(pointerEnd, pointerDown) < 4) {
-                const { pageX, pageY } = ev;
+            if (!hasMoved && Vec2.distance(pointerEnd, pointerDown) < 4) {
+                const { pageX, pageY } = getPagePosition(ev);
                 const [x, y] = pointerEnd;
 
                 click.next({ x, y, pageX, pageY, buttons, button, modifiers: getModifierKeys() });
             }
+            hasMoved = false;
         }
 
         function onPointerMove(ev: PointerEvent) {
             eventOffset(pointerEnd, ev);
-            const { pageX, pageY } = ev;
+            const { pageX, pageY } = getPagePosition(ev);
             const [x, y] = pointerEnd;
-            const inside = insideBounds(pointerEnd);
-            move.next({ x, y, pageX, pageY, buttons, button, modifiers: getModifierKeys(), inside });
+            const { movementX, movementY } = ev;
+
+            const inside = insideBounds(pointerEnd) && mask(ev.clientX, ev.clientY);
+            if (isInside && !inside) {
+                leave.next(void 0);
+            } else if (!isInside && inside) {
+                enter.next(void 0);
+            }
+            isInside = inside;
+
+            position.x = x;
+            position.y = y;
+            position.pageX = pageX;
+            position.pageY = pageY;
+
+            move.next({ x, y, pageX, pageY, movementX, movementY, buttons, button, modifiers: getModifierKeys(), inside, onElement: ev.target === element });
 
             if (dragging === DraggingState.Stopped) return;
 
@@ -604,6 +787,10 @@ namespace InputObserver {
             const isStart = dragging === DraggingState.Started;
             if (isStart && !mask(ev.clientX, ev.clientY)) return;
 
+            if (Vec2.distance(pointerEnd, pointerDown) >= 4) {
+                hasMoved = true;
+            }
+
             const [dx, dy] = pointerDelta;
             drag.next({ x, y, dx, dy, pageX, pageY, buttons, button, modifiers: getModifierKeys(), isStart });
 
@@ -615,7 +802,7 @@ namespace InputObserver {
             if (!mask(ev.clientX, ev.clientY)) return;
 
             eventOffset(pointerEnd, ev);
-            const { pageX, pageY } = ev;
+            const { pageX, pageY } = getPagePosition(ev);
             const [x, y] = pointerEnd;
 
             if (noScroll) {
@@ -669,17 +856,9 @@ namespace InputObserver {
             gestureDelta(ev, true);
         }
 
-        function onMouseEnter(ev: Event) {
-            isInside = true;
-            enter.next(void 0);
-        }
-
-        function onMouseLeave(ev: Event) {
-            isInside = false;
-            leave.next(void 0);
-        }
-
-        function onResize(ev: Event) {
+        function onResize() {
+            width = element.clientWidth * pixelRatio();
+            height = element.clientHeight * pixelRatio();
             resize.next({});
         }
 
@@ -698,24 +877,115 @@ namespace InputObserver {
             return out;
         }
 
-        function eventOffset(out: Vec2, ev: PointerEvent) {
+        function eventOffset(out: Vec2, ev: { clientX: number, clientY: number }) {
             width = element.clientWidth * pixelRatio();
             height = element.clientHeight * pixelRatio();
 
-            const cx = ev.clientX || 0;
-            const cy = ev.clientY || 0;
-            const rect = element.getBoundingClientRect();
-            out[0] = cx - rect.left;
-            out[1] = cy - rect.top;
+            if (isLocked) {
+                const pr = pixelRatio();
+                out[0] = (lockedViewport.x + lockedViewport.width / 2) / pr;
+                out[1] = (height - (lockedViewport.y + lockedViewport.height / 2)) / pr;
+            } else {
+                const rect = element.getBoundingClientRect();
+                out[0] = (ev.clientX || 0) - rect.left;
+                out[1] = (ev.clientY || 0) - rect.top;
+            }
             return out;
         }
+
+        function getPagePosition(ev: { pageX: number, pageY: number }) {
+            if (isLocked) {
+                return {
+                    pageX: Math.round(window.innerWidth / 2) + lockedViewport.x,
+                    pageY: Math.round(window.innerHeight / 2) + lockedViewport.y
+                };
+            } else {
+                return {
+                    pageX: ev.pageX,
+                    pageY: ev.pageY
+                };
+            }
+        }
+
+        const crossWidth = 30;
+        const cross = addCross();
+
+        function addCross() {
+            const cross = document.createElement('div');
+
+            const b = '30%';
+            const t = '10%';
+            const c = `#000 ${b}, #0000 0 calc(100% - ${b}), #000 0`;
+            const vline = `linear-gradient(0deg, ${c}) 50%/${t} 100% no-repeat`;
+            const hline = `linear-gradient(90deg, ${c}) 50%/100% ${t} no-repeat`;
+            const cdot = 'radial-gradient(circle at 50%, #000 5%, #0000 5%)';
+            Object.assign(cross.style, {
+                width: `${crossWidth}px`,
+                aspectRatio: 1,
+                background: `${vline}, ${hline}, ${cdot}`,
+                display: 'none',
+                zIndex: 1000,
+                position: 'absolute',
+                mixBlendMode: 'difference',
+                filter: 'invert(1)',
+            });
+
+            element.parentElement?.appendChild(cross);
+
+            return cross;
+        }
+
+        function toggleCross(value: boolean) {
+            cross.style.display = value ? 'block' : 'none';
+            if (value) {
+                const pr = pixelRatio();
+                const offsetX = (lockedViewport.x + lockedViewport.width / 2) / pr;
+                const offsetY = (lockedViewport.y + lockedViewport.height / 2) / pr;
+                cross.style.width = `${crossWidth}px`;
+                cross.style.left = `calc(${offsetX}px - ${crossWidth / 2}px)`;
+                cross.style.bottom = `calc(${offsetY}px - ${crossWidth / 2}px)`;
+            }
+        }
+
+        return {
+            get noScroll() { return noScroll; },
+            set noScroll(value: boolean) { noScroll = value; },
+            get noContextMenu() { return noContextMenu; },
+            set noContextMenu(value: boolean) { noContextMenu = value; },
+
+            get width() { return width; },
+            get height() { return height; },
+            get pixelRatio() { return pixelRatio(); },
+            get pointerLock() { return isLocked; },
+
+            ...events,
+
+            setPixelScale: (value: number) => {
+                pixelScale = value;
+                width = element.clientWidth * pixelRatio();
+                height = element.clientHeight * pixelRatio();
+            },
+
+            requestPointerLock: (viewport: Viewport) => {
+                lockedViewport = viewport;
+                if (!isLocked) {
+                    element.requestPointerLock();
+                }
+            },
+            exitPointerLock: () => {
+                if (isLocked) {
+                    element.ownerDocument.exitPointerLock();
+                }
+            },
+            dispose
+        };
     }
 }
 
 
 // Adapted from https://stackoverflow.com/a/30134826
 // License: https://creativecommons.org/licenses/by-sa/3.0/
-function normalizeWheel(event: any) {
+export function normalizeWheel(event: any) {
     // Reasonable defaults
     const PIXEL_STEP = 10;
     const LINE_HEIGHT = 40;

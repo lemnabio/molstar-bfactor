@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
@@ -11,6 +11,7 @@ import { OrderedSet } from '../../../mol-data/int';
 import { NumberArray, PickRequired } from '../../../mol-util/type-helpers';
 import { Box3D } from './box3d';
 import { Axes3D } from './axes3d';
+import { PrincipalAxes } from '../../linear-algebra/matrix/principal-axes';
 
 interface Sphere3D {
     center: Vec3,
@@ -108,9 +109,27 @@ namespace Sphere3D {
         return out;
     }
 
-    export function toArray(s: Sphere3D, out: NumberArray, offset: number) {
+    /** Scale sphere by a number */
+    export function scale(out: Sphere3D, sphere: Sphere3D, s: number) {
+        Vec3.scale(out.center, sphere.center, s);
+        out.radius = sphere.radius * s;
+        if (hasExtrema(sphere)) {
+            setExtrema(out, sphere.extrema.map(e => Vec3.scale(Vec3(), e, s)));
+        }
+        return out;
+    }
+
+    /** Scale sphere by a number but without extrema */
+    export function scaleNX(out: Sphere3D, sphere: Sphere3D, s: number) {
+        Vec3.scale(out.center, sphere.center, s);
+        out.radius = sphere.radius * s;
+        return out;
+    }
+
+    export function toArray<T extends NumberArray>(s: Sphere3D, out: T, offset: number) {
         Vec3.toArray(s.center, out, offset);
         out[offset + 3] = s.radius;
+        return out;
     }
 
     export function fromArray(out: Sphere3D, array: NumberArray, offset: number) {
@@ -202,11 +221,35 @@ namespace Sphere3D {
             return out;
         }
         if (hasExtrema(sphere)) {
+            const positions = new Float32Array(sphere.extrema.length * 3);
+            for (let i = 0; i < sphere.extrema.length; i++) {
+                Vec3.toArray(sphere.extrema[i], positions, i * 3);
+            }
+
+            const axes = PrincipalAxes.calculateMomentsAxes(positions);
+            Axes3D.scale(axes, Axes3D.normalize(axes, axes), delta);
+
             setExtrema(out, sphere.extrema.map(e => {
-                Vec3.sub(tmpDir, e, sphere.center);
-                const dist = Vec3.distance(sphere.center, e);
-                Vec3.normalize(tmpDir, tmpDir);
-                return Vec3.scaleAndAdd(Vec3(), sphere.center, tmpDir, dist + delta);
+                Vec3.normalize(tmpDir, Vec3.sub(tmpDir, e, sphere.center));
+                const o = Vec3.clone(e);
+
+                const sA = Vec3.dot(tmpDir, axes.dirA) < 0 ? -1 : 1;
+                Vec3.scaleAndAdd(o, o, axes.dirA, sA);
+
+                const sB = Vec3.dot(tmpDir, axes.dirB) < 0 ? -1 : 1;
+                Vec3.scaleAndAdd(o, o, axes.dirB, sB);
+
+                const sC = Vec3.dot(tmpDir, axes.dirC) < 0 ? -1 : 1;
+                Vec3.scaleAndAdd(o, o, axes.dirC, sC);
+
+                if (Vec3.distance(out.center, o) > out.radius) {
+                    if (sphere.extrema.length >= 14) { // 14 extrema with coarse boundary helper
+                        Vec3.normalize(tmpDir, Vec3.sub(tmpDir, o, sphere.center));
+                    }
+                    Vec3.scaleAndAdd(o, out.center, tmpDir, out.radius);
+                }
+
+                return o;
             }));
         }
         return out;
@@ -251,6 +294,12 @@ namespace Sphere3D {
     /** Get the signed distance of `a` and `b` */
     export function distance(a: Sphere3D, b: Sphere3D) {
         return Vec3.distance(a.center, b.center) - a.radius + b.radius;
+    }
+
+    /** Get the distance of v from sphere. If negative, v is inside sphere */
+    export function distanceToVec(sphere: Sphere3D, v: Vec3): number {
+        const { center, radius } = sphere;
+        return Vec3.distance(v, center) - radius;
     }
 }
 

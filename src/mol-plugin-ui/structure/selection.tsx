@@ -1,8 +1,11 @@
 /**
- * Copyright (c) 2019-2020 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2019-2024 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  * @author David Sehnal <david.sehnal@gmail.com>
+ * @author Jason Pattle <jpattle.exscientia.co.uk>
+ * @author Ludovic Autin <ludovic.autin@gmail.com>
+ * @author Ventura Rivera <venturaxrivera@gmail.com>
  */
 
 import * as React from 'react';
@@ -12,6 +15,7 @@ import { InteractivityManager } from '../../mol-plugin-state/manager/interactivi
 import { StructureComponentManager } from '../../mol-plugin-state/manager/structure/component';
 import { StructureComponentRef, StructureRef } from '../../mol-plugin-state/manager/structure/hierarchy-state';
 import { StructureSelectionModifier } from '../../mol-plugin-state/manager/structure/selection';
+import { PluginConfig } from '../../mol-plugin/config';
 import { PluginContext } from '../../mol-plugin/context';
 import { compileIdListSelection } from '../../mol-script/util/id-list';
 import { memoizeLatest } from '../../mol-util/memoize';
@@ -35,7 +39,7 @@ export class ToggleSelectionModeButton extends PurePluginUIComponent<{ inline?: 
 
     _toggleSelMode = () => {
         this.plugin.selectionMode = !this.plugin.selectionMode;
-    }
+    };
 
     render() {
         const style = this.props.inline
@@ -58,6 +62,8 @@ interface StructureSelectionActionsControlsState {
 
     action?: StructureSelectionModifier | 'theme' | 'add-component' | 'help',
     helper?: SelectionHelperType,
+
+    structureSelectionParams?: typeof StructureSelectionParams,
 }
 
 const ActionHeader = new Map<StructureSelectionModifier, string>([
@@ -75,7 +81,9 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
         isEmpty: true,
         isBusy: false,
         canUndo: false,
-    }
+
+        structureSelectionParams: StructureSelectionParams,
+    };
 
     componentDidMount() {
         this.subscribe(this.plugin.managers.structure.hierarchy.behaviors.selection, c => {
@@ -99,6 +107,20 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
         this.subscribe(this.plugin.state.data.events.historyUpdated, ({ state }) => {
             this.setState({ canUndo: state.canUndo });
         });
+
+        // Update structureSelectionParams state if there are custom-defined granularityOptions
+        const granularityOptions = this.plugin.spec.components?.selectionTools?.granularityOptions;
+        if (granularityOptions) {
+            const granularitySet = new Set((granularityOptions));
+            const structureSelectionParams = {
+                ...StructureSelectionParams,
+                granularity: {
+                    ...StructureSelectionParams.granularity,
+                    options: StructureSelectionParams.granularity.options.filter(([firstItem]) => granularitySet.has(firstItem)),
+                },
+            };
+            this.setState({ structureSelectionParams: structureSelectionParams });
+        }
     }
 
     get isDisabled() {
@@ -107,7 +129,7 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
 
     set = (modifier: StructureSelectionModifier, selectionQuery: StructureSelectionQuery) => {
         this.plugin.managers.structure.selection.fromSelectionQuery(modifier, selectionQuery, false);
-    }
+    };
 
     selectQuery: ActionMenu.OnSelect = (item, e) => {
         if (!item || !this.state.action) {
@@ -122,7 +144,7 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
                 this.set(q, item.value as StructureSelectionQuery);
             });
         }
-    }
+    };
 
     selectHelper: ActionMenu.OnSelect = (item, e) => {
         console.log(item);
@@ -131,7 +153,7 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
             return;
         }
         this.setState({ helper: (item.value as { kind: SelectionHelperType }).kind });
-    }
+    };
 
     get structures() {
         const structures: Structure[] = [];
@@ -142,8 +164,8 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
         return structures;
     }
 
-    private queriesItems: ActionMenu.Items[] = []
-    private queriesVersion = -1
+    private queriesItems: ActionMenu.Items[] = [];
+    private queriesVersion = -1;
     get queries() {
         const { registry } = this.plugin.query.structure;
         if (registry.version !== this.queriesVersion) {
@@ -186,24 +208,24 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
         return () => this.setState({ action: this.state.action === q ? void 0 : q, helper: void 0 });
     }
 
-    toggleAdd = this.showAction('add')
-    toggleRemove = this.showAction('remove')
-    toggleIntersect = this.showAction('intersect')
-    toggleSet = this.showAction('set')
-    toggleTheme = this.showAction('theme')
-    toggleAddComponent = this.showAction('add-component')
-    toggleHelp = this.showAction('help')
+    toggleAdd = this.showAction('add');
+    toggleRemove = this.showAction('remove');
+    toggleIntersect = this.showAction('intersect');
+    toggleSet = this.showAction('set');
+    toggleTheme = this.showAction('theme');
+    toggleAddComponent = this.showAction('add-component');
+    toggleHelp = this.showAction('help');
 
     setGranuality: ParamOnChange = ({ value }) => {
         this.plugin.managers.interactivity.setProps({ granularity: value });
-    }
+    };
 
     turnOff = () => this.plugin.selectionMode = false;
 
     undo = () => {
         const task = this.plugin.state.data.undo();
         if (task) this.plugin.runTask(task);
-    }
+    };
 
     subtract = () => {
         const sel = this.plugin.managers.structure.hierarchy.getStructuresWithSelection();
@@ -211,10 +233,11 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
         for (const s of sel) components.push(...s.components);
         if (components.length === 0) return;
         this.plugin.managers.structure.component.modifyByCurrentSelection(components, 'subtract');
-    }
+    };
 
     render() {
         const granularity = this.plugin.managers.interactivity.props.granularity;
+        const hide = this.plugin.spec.components?.selectionTools?.hide;
         const undoTitle = this.state.canUndo
             ? `Undo ${this.plugin.state.data.latestUndoLabel}`
             : 'Some mistakes of the past can be undone.';
@@ -260,19 +283,19 @@ export class StructureSelectionActionsControls extends PluginUIComponent<{}, Str
 
         return <>
             <div className='msp-flex-row' style={{ background: 'none' }}>
-                <PureSelectControl title={`Picking Level for selecting and highlighting`} param={StructureSelectionParams.granularity} name='granularity' value={granularity} onChange={this.setGranuality} isDisabled={this.isDisabled} />
-                <ToggleButton icon={UnionSvg} title={`${ActionHeader.get('add')}. Hold shift key to keep menu open.`} toggle={this.toggleAdd} isSelected={this.state.action === 'add'} disabled={this.isDisabled} />
-                <ToggleButton icon={SubtractSvg} title={`${ActionHeader.get('remove')}. Hold shift key to keep menu open.`} toggle={this.toggleRemove} isSelected={this.state.action === 'remove'} disabled={this.isDisabled} />
-                <ToggleButton icon={IntersectSvg} title={`${ActionHeader.get('intersect')}. Hold shift key to keep menu open.`} toggle={this.toggleIntersect} isSelected={this.state.action === 'intersect'} disabled={this.isDisabled} />
-                <ToggleButton icon={SetSvg} title={`${ActionHeader.get('set')}. Hold shift key to keep menu open.`} toggle={this.toggleSet} isSelected={this.state.action === 'set'} disabled={this.isDisabled} />
+                {(!hide?.granularity) && <PureSelectControl title={`Picking Level for selecting and highlighting`} param={this.state.structureSelectionParams.granularity} name='granularity' value={granularity} onChange={this.setGranuality} isDisabled={this.isDisabled} />}
+                {(!hide?.union) && <ToggleButton icon={UnionSvg} title={`${ActionHeader.get('add')}. Hold shift key to keep menu open.`} toggle={this.toggleAdd} isSelected={this.state.action === 'add'} disabled={this.isDisabled} />}
+                {(!hide?.subtract) && <ToggleButton icon={SubtractSvg} title={`${ActionHeader.get('remove')}. Hold shift key to keep menu open.`} toggle={this.toggleRemove} isSelected={this.state.action === 'remove'} disabled={this.isDisabled} />}
+                {(!hide?.intersect) && <ToggleButton icon={IntersectSvg} title={`${ActionHeader.get('intersect')}. Hold shift key to keep menu open.`} toggle={this.toggleIntersect} isSelected={this.state.action === 'intersect'} disabled={this.isDisabled} />}
+                {(!hide?.set) && <ToggleButton icon={SetSvg} title={`${ActionHeader.get('set')}. Hold shift key to keep menu open.`} toggle={this.toggleSet} isSelected={this.state.action === 'set'} disabled={this.isDisabled} />}
 
-                <ToggleButton icon={BrushSvg} title='Apply Theme to Selection' toggle={this.toggleTheme} isSelected={this.state.action === 'theme'} disabled={this.isDisabled} style={{ marginLeft: '10px' }} />
-                <ToggleButton icon={CubeOutlineSvg} title='Create Component of Selection with Representation' toggle={this.toggleAddComponent} isSelected={this.state.action === 'add-component'} disabled={this.isDisabled} />
-                <IconButton svg={RemoveSvg} title='Remove/subtract Selection from all Components' onClick={this.subtract} disabled={this.isDisabled} />
-                <IconButton svg={RestoreSvg} onClick={this.undo} disabled={!this.state.canUndo || this.isDisabled} title={undoTitle} />
+                {(!hide?.theme) && <ToggleButton icon={BrushSvg} title='Apply Theme to Selection' toggle={this.toggleTheme} isSelected={this.state.action === 'theme'} disabled={this.isDisabled} style={{ marginLeft: '10px' }} />}
+                {(!hide?.componentAdd) && <ToggleButton icon={CubeOutlineSvg} title='Create Component of Selection with Representation' toggle={this.toggleAddComponent} isSelected={this.state.action === 'add-component'} disabled={this.isDisabled} />}
+                {(!hide?.componentRemove) && <IconButton svg={RemoveSvg} title='Remove/subtract Selection from all Components' onClick={this.subtract} disabled={this.isDisabled} />}
+                {(!hide?.undo) && <IconButton svg={RestoreSvg} onClick={this.undo} disabled={!this.state.canUndo || this.isDisabled} title={undoTitle} />}
 
-                <ToggleButton icon={HelpOutlineSvg} title='Show/hide help' toggle={this.toggleHelp} style={{ marginLeft: '10px' }} isSelected={this.state.action === 'help'} />
-                <IconButton svg={CancelOutlinedSvg} title='Turn selection mode off' onClick={this.turnOff} />
+                {(!hide?.help) && <ToggleButton icon={HelpOutlineSvg} title='Show/hide help' toggle={this.toggleHelp} style={{ marginLeft: '10px' }} isSelected={this.state.action === 'help'} />}
+                {((!hide?.cancel) && this.plugin.config.get(PluginConfig.Viewport.ShowSelectionMode)) && (<IconButton svg={CancelOutlinedSvg} title='Turn selection mode off' onClick={this.turnOff} />)}
             </div>
             {children}
         </>;
@@ -283,7 +306,7 @@ export class StructureSelectionStatsControls extends PluginUIComponent<{ hideOnE
     state = {
         isEmpty: true,
         isBusy: false
-    }
+    };
 
     componentDidMount() {
         this.subscribe(this.plugin.managers.structure.selection.events.changed, () => {
@@ -321,18 +344,18 @@ export class StructureSelectionStatsControls extends PluginUIComponent<{ hideOnE
         if (this.plugin.managers.structure.selection.stats.elementCount === 0) return;
         const { sphere } = this.plugin.managers.structure.selection.getBoundary();
         this.plugin.managers.camera.focusSphere(sphere);
-    }
+    };
 
     highlight = (e: React.MouseEvent<HTMLElement>) => {
         this.plugin.managers.interactivity.lociHighlights.clearHighlights();
         this.plugin.managers.structure.selection.entries.forEach(e => {
             this.plugin.managers.interactivity.lociHighlights.highlight({ loci: e.selection }, false);
         });
-    }
+    };
 
     clearHighlight = () => {
         this.plugin.managers.interactivity.lociHighlights.clearHighlights();
-    }
+    };
 
     render() {
         const stats = this.plugin.managers.structure.selection.stats;
@@ -369,9 +392,9 @@ class ApplyThemeControls extends PurePluginUIComponent<ApplyThemeControlsProps, 
     apply = () => {
         this.plugin.managers.structure.component.applyTheme(this.state.values, this.plugin.managers.structure.hierarchy.current.structures);
         this.props.onApply?.();
-    }
+    };
 
-    paramsChanged = (values: any) => this.setState({ values })
+    paramsChanged = (values: any) => this.setState({ values });
 
     render() {
         return <>
@@ -384,8 +407,8 @@ class ApplyThemeControls extends PurePluginUIComponent<ApplyThemeControlsProps, 
 }
 
 const ResidueListIdTypeParams = {
-    idType: ParamDefinition.Select<'auth' | 'label' | 'atom-id'>('auth', ParamDefinition.arrayToOptions(['auth', 'label', 'atom-id'])),
-    identifiers: ParamDefinition.Text('', { description: 'A comma separated list of atom identifiers (e.g. 10, 15-25) or residue ranges in given chain (e.g. A 10-15, B 25, C 30:i)' })
+    idType: ParamDefinition.Select<'auth' | 'label' | 'atom-id' | 'element-symbol'>('auth', ParamDefinition.arrayToOptions(['auth', 'label', 'atom-id', 'element-symbol'])),
+    identifiers: ParamDefinition.Text('', { description: 'A comma separated list of atom identifiers (e.g. 10, 15-25), element symbols (e.g. N, C or 20-200) or residue ranges in given chain (e.g. A 10-15, B 25, C 30:i)' })
 };
 
 const DefaultResidueListIdTypeParams = ParamDefinition.getDefaultValues(ResidueListIdTypeParams);
@@ -401,7 +424,8 @@ function ResidueListSelectionHelper({ modifier, plugin, close }: { modifier: Str
             const query = compileIdListSelection(state.identifiers, state.idType);
             plugin.managers.structure.selection.fromCompiledQuery(modifier, query, false);
         } catch (e) {
-            plugin.log.error(`Failed to create selection: ${e}`);
+            console.error(e);
+            plugin.log.error('Failed to create selection');
         }
     };
 

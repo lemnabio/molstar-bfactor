@@ -1,11 +1,12 @@
 /**
- * Copyright (c) 2018 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author David Sehnal <david.sehnal@gmail.com>
  */
 
 import { StateTransformer } from './transformer';
 import { UUID } from '../mol-util';
+import { hashMurmur128o } from '../mol-data/util';
 
 export { Transform as StateTransform };
 
@@ -41,11 +42,6 @@ namespace Transform {
         isCollapsed?: boolean
     }
 
-    export function areStatesEqual(a: State, b: State) {
-        return !!a.isHidden !== !!b.isHidden || !!a.isCollapsed !== !!b.isCollapsed
-            || !!a.isGhost !== !!b.isGhost || !!a.isLocked !== !!b.isLocked;
-    }
-
     export function isStateChange(a: State, b?: Partial<State>) {
         if (!b) return false;
         if (typeof b.isCollapsed !== 'undefined' && a.isCollapsed !== b.isCollapsed) return true;
@@ -76,14 +72,23 @@ namespace Transform {
             const s = (b as any)[k], t = (a as any)[k];
             if (!!s === !!t) continue;
             changed = true;
-            (a as any)[k] = s;
+            if (s !== void 0) {
+                (a as any)[k] = s;
+            } else {
+                delete (a as any)[k];
+            }
         }
         for (const k of Object.keys(a)) {
             const s = (b as any)[k], t = (a as any)[k];
             if (!!s === !!t) continue;
             changed = true;
-            (a as any)[k] = s;
+            if (s !== void 0) {
+                (a as any)[k] = s;
+            } else {
+                delete (a as any)[k];
+            }
         }
+
         return changed;
     }
 
@@ -133,6 +138,16 @@ namespace Transform {
         return { ...t, tags, version: UUID.create22() };
     }
 
+    export function withDependsOn(t: Transform, newDependsOn?: string | string[]): Transform {
+        let dependsOn: string[] | undefined = void 0;
+        if (newDependsOn) {
+            dependsOn = typeof newDependsOn === 'string' ? [newDependsOn] : newDependsOn;
+            if (dependsOn.length === 0) dependsOn = void 0;
+            else dependsOn.sort();
+        }
+        return { ...t, dependsOn, version: UUID.create22() };
+    }
+
     export function withParent(t: Transform, parent: Ref): Transform {
         return { ...t, parent, version: UUID.create22() };
     }
@@ -153,6 +168,21 @@ namespace Transform {
             if (t.tags.indexOf(tag) < 0) return false;
         }
         return true;
+    }
+
+    const _emptyParams = {};
+    /** Updates the version of the transform to be computed as hash of the parameters */
+    export function setParamsHashVersion(t: Transform) {
+        let version: string;
+        try {
+            version = hashMurmur128o(t.params ?? _emptyParams);
+        } catch {
+            const pToJson = t.transformer.definition.customSerialization
+                ? t.transformer.definition.customSerialization.toJSON
+                : _id;
+            version = hashMurmur128o(pToJson(t.params ?? _emptyParams));
+        }
+        (t as { version: string }).version = version;
     }
 
     export interface Serialized {

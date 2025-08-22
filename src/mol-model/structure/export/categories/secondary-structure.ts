@@ -6,7 +6,7 @@
 
 import { Segmentation } from '../../../../mol-data/int';
 import { CifWriter } from '../../../../mol-io/writer/cif';
-import { SecondaryStructure } from '../../model/properties/seconday-structure';
+import { SecondaryStructure } from '../../model/properties/secondary-structure';
 import { StructureElement, Unit } from '../../structure';
 import { CifExportContext } from '../mmcif';
 import CifField = CifWriter.Field
@@ -49,7 +49,7 @@ const struct_conf_fields = (): CifField[] => [
     ...residueIdFields<number, SSElement<SecondaryStructure.Helix>[]>((i, e) => e[i].end, { prefix: 'end' }),
     CifField.str<number, SSElement<SecondaryStructure.Helix>[]>('pdbx_PDB_helix_class', (i, data) => data[i].element.helix_class),
     CifField.str<number, SSElement<SecondaryStructure.Helix>[]>('details', (i, data) => data[i].element.details || '', {
-        valueKind: (i, d) => !!d[i].element.details ? Column.ValueKind.Present : Column.ValueKind.Unknown
+        valueKind: (i, d) => !!d[i].element.details ? Column.ValueKinds.Present : Column.ValueKinds.Unknown
     }),
     CifField.int<number, SSElement<SecondaryStructure.Helix>[]>('pdbx_PDB_helix_length', (i, data) => data[i].length)
 ];
@@ -59,7 +59,7 @@ const struct_sheet_range_fields = (): CifField[] => [
     CifField.index('id'),
     ...residueIdFields<number, SSElement<SecondaryStructure.Sheet>[]>((i, e) => e[i].start, { prefix: 'beg' }),
     ...residueIdFields<number, SSElement<SecondaryStructure.Sheet>[]>((i, e) => e[i].end, { prefix: 'end' }),
-    CifField.str('symmetry', (i, data) => '', { valueKind: (i, d) => Column.ValueKind.Unknown })
+    CifField.str('symmetry', (i, data) => '', { valueKind: (i, d) => Column.ValueKinds.Unknown })
 ];
 
 interface SSElement<T extends SecondaryStructure.Element> {
@@ -78,12 +78,12 @@ function findElements<T extends SecondaryStructure.Element>(ctx: CifExportContex
     const ssElements: SSElement<any>[] = [];
 
     const structure = ctx.structures[0];
-    for (const unit of structure.units) {
-        // currently can only support this for "identity" operators.
-        if (!Unit.isAtomic(unit) || !unit.conformation.operator.isIdentity) continue;
+    for (const { units } of structure.unitSymmetryGroups) {
+        const u = units[0];
+        if (!Unit.isAtomic(u)) continue;
 
-        const segs = unit.model.atomicHierarchy.residueAtomSegments;
-        const residues = Segmentation.transientSegments(segs, unit.elements);
+        const segs = u.model.atomicHierarchy.residueAtomSegments;
+        const residues = Segmentation.transientSegments(segs, u.elements);
 
         let current: Segmentation.Segment, move = true;
         while (residues.hasNext) {
@@ -104,8 +104,8 @@ function findElements<T extends SecondaryStructure.Element>(ctx: CifExportContex
                 if (startIdx !== key[current.index]) {
                     move = false;
                     ssElements[ssElements.length] = {
-                        start: StructureElement.Location.create(structure, unit, segs.offsets[start]),
-                        end: StructureElement.Location.create(structure, unit, segs.offsets[prev]),
+                        start: StructureElement.Location.create(structure, u, segs.offsets[start]),
+                        end: StructureElement.Location.create(structure, u, segs.offsets[prev]),
                         length: prev - start + 1,
                         element
                     };

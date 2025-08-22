@@ -117,7 +117,7 @@ export function defaults<T>(value: T | undefined, defaultValue: T): T {
     return value !== undefined ? value : defaultValue;
 }
 
-export function extend<S, T, U>(object: S, source: T, guard?: U): S & T & U {
+export function extend<S extends {}, T extends {}, U extends {}>(object: S, source: T, guard?: U): S & T & U {
     let v: any;
 
     const s = <any>source;
@@ -139,7 +139,7 @@ export function extend<S, T, U>(object: S, source: T, guard?: U): S & T & U {
     return <any>object;
 }
 
-export function shallowClone<T>(o: T): T {
+export function shallowClone<T extends {}>(o: T): T {
     return extend({}, o) as T;
 }
 
@@ -158,7 +158,7 @@ function _assign<T>(target: T): T {
 export declare function _assignType<T>(o: T, ...from: any[]): T;
 export const assign: (<T>(o: T, ...from: any[]) => T) = (Object as any).assign || _assign;
 
-function _shallowMerge1<T>(source: T, update: T) {
+function _shallowMerge1<T extends {}>(source: T, update: T) {
     let changed = false;
     for (const k of Object.keys(update)) {
         if (!hasOwnProperty.call(update, k)) continue;
@@ -202,4 +202,10 @@ export function formatProgress(p: Progress) {
     if (tp.isIndeterminate) return tp.message;
     const x = (100 * tp.current / tp.max).toFixed(2);
     return `${tp.message} ${x}%`;
+}
+
+export function formatBytes(count: number) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    const i = Math.floor(Math.log(count) / Math.log(1024));
+    return `${(count / Math.pow(1024, i)).toFixed(2)} ${units[i]}`;
 }

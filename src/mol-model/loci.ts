@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2018-2021 mol* contributors, licensed under MIT, See LICENSE file for more info.
+ * Copyright (c) 2018-2025 mol* contributors, licensed under MIT, See LICENSE file for more info.
  *
  * @author Alexander Rose <alexander.rose@weirdbyte.de>
  */
@@ -17,6 +17,7 @@ import { FiniteArray } from '../mol-util/type-helpers';
 import { BoundaryHelper } from '../mol-math/geometry/boundary-helper';
 import { stringToWords } from '../mol-util/string';
 import { Volume } from './volume/volume';
+import { Interval } from '../mol-data/int';
 
 /** A Loci that includes every loci */
 export const EveryLoci = { kind: 'every-loci' as 'every-loci' };
@@ -64,7 +65,7 @@ export function DataLoci<T = unknown, E = unknown>(tag: string, data: T, element
 
 export { Loci };
 
-type Loci = StructureElement.Loci | Structure.Loci | Bond.Loci | EveryLoci | EmptyLoci | DataLoci | Shape.Loci | ShapeGroup.Loci | Volume.Loci | Volume.Isosurface.Loci | Volume.Cell.Loci
+type Loci = StructureElement.Loci | Structure.Loci | Bond.Loci | EveryLoci | EmptyLoci | DataLoci | Shape.Loci | ShapeGroup.Loci | Volume.Loci | Volume.Isosurface.Loci | Volume.Cell.Loci | Volume.Segment.Loci
 
 namespace Loci {
     export interface Bundle<L extends number> { loci: FiniteArray<Loci, L> }
@@ -109,6 +110,9 @@ namespace Loci {
         if (Volume.Cell.isLoci(lociA) && Volume.Cell.isLoci(lociB)) {
             return Volume.Cell.areLociEqual(lociA, lociB);
         }
+        if (Volume.Segment.isLoci(lociA) && Volume.Segment.isLoci(lociB)) {
+            return Volume.Segment.areLociEqual(lociA, lociB);
+        }
         return false;
     }
 
@@ -128,6 +132,7 @@ namespace Loci {
         if (Volume.isLoci(loci)) return Volume.isLociEmpty(loci);
         if (Volume.Isosurface.isLoci(loci)) return Volume.Isosurface.isLociEmpty(loci);
         if (Volume.Cell.isLoci(loci)) return Volume.Cell.isLociEmpty(loci);
+        if (Volume.Segment.isLoci(loci)) return Volume.Segment.isLociEmpty(loci);
         return false;
     }
 
@@ -166,7 +171,9 @@ namespace Loci {
         } else if (loci.kind === 'isosurface-loci') {
             return Volume.Isosurface.getBoundingSphere(loci.volume, loci.isoValue, boundingSphere);
         } else if (loci.kind === 'cell-loci') {
-            return Volume.Cell.getBoundingSphere(loci.volume, loci.indices, boundingSphere);
+            return Volume.Cell.getBoundingSphere(loci.volume, loci.elements, boundingSphere);
+        } else if (loci.kind === 'segment-loci') {
+            return Volume.Segment.getBoundingSphere(loci.volume, loci.elements, boundingSphere);
         }
     }
 
@@ -202,6 +209,9 @@ namespace Loci {
             // TODO
             return void 0;
         } else if (loci.kind === 'cell-loci') {
+            // TODO
+            return void 0;
+        } else if (loci.kind === 'segment-loci') {
             // TODO
             return void 0;
         }
@@ -241,7 +251,11 @@ namespace Loci {
                 ? Structure.toStructureElementLoci(loci.structure)
                 : ShapeGroup.isLoci(loci)
                     ? Shape.Loci(loci.shape)
-                    : loci;
+                    : Volume.Cell.isLoci(loci)
+                        ? Volume.Loci(loci.volume, Interval.ofLength(loci.volume.instances.length))
+                        : Volume.Isosurface.isLoci(loci)
+                            ? Volume.Loci(loci.volume, Interval.ofLength(loci.volume.instances.length))
+                            : loci;
         },
         'elementInstances': (loci: Loci) => {
             return StructureElement.Loci.is(loci)

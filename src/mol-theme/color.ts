@@ -33,7 +33,6 @@ import { OccupancyColorThemeProvider } from './color/occupancy';
 import { OperatorNameColorThemeProvider } from './color/operator-name';
 import { OperatorHklColorThemeProvider } from './color/operator-hkl';
 import { PartialChargeColorThemeProvider } from './color/partial-charge';
-import { PredictionColorThemeProvider } from './color/prediction';
 import { AtomIdColorThemeProvider } from './color/atom-id';
 import { EntityIdColorThemeProvider } from './color/entity-id';
 import type { Texture, TextureFilter } from '../mol-gl/webgl/texture';
@@ -52,61 +51,71 @@ import { getPrecision } from '../mol-util/number';
 import { SortedArray } from '../mol-data/int/sorted-array';
 import { normalize } from '../mol-math/interpolate';
 import { VolumeInstanceColorThemeProvider } from './color/volume-instance';
+import { ColorScale } from '../mol-util/color';
+import { StructureElement, Unit, Bond, ElementIndex } from '../mol-model/structure';
 
-export type LocationColor = (location: Location, isSecondary: boolean) => Color
+export type LocationColor = (location: Location, isSecondary: boolean) => Color;
 
 export interface ColorVolume {
-    colors: Texture
-    dimension: Vec3
-    transform: Vec4
+    colors: Texture;
+    dimension: Vec3;
+    transform: Vec4;
 }
 
 export { ColorTheme };
 
 type ColorThemeShared<P extends PD.Params, G extends ColorType> = {
-    readonly factory: ColorTheme.Factory<P, G>
-    readonly props: Readonly<PD.Values<P>>
+    readonly factory: ColorTheme.Factory<P, G>;
+    readonly props: Readonly<PD.Values<P>>;
     /**
      * if palette is defined, 24bit RGB color value normalized to interval [0, 1]
      * is used as index to the colors
      */
-    readonly palette?: Readonly<ColorTheme.Palette>
-    readonly preferSmoothing?: boolean
-    readonly contextHash?: number
-    readonly description?: string
-    readonly legend?: Readonly<ScaleLegend | TableLegend>
-}
+    readonly palette?: Readonly<ColorTheme.Palette>;
+    readonly preferSmoothing?: boolean;
+    readonly contextHash?: number;
+    readonly description?: string;
+    readonly legend?: Readonly<ScaleLegend | TableLegend>;
+};
 
 type ColorThemeLocation<P extends PD.Params> = {
-    readonly granularity: ColorTypeLocation
-    readonly color: LocationColor
-} & ColorThemeShared<P, ColorTypeLocation>
+    readonly granularity: ColorTypeLocation;
+    readonly color: LocationColor;
+} & ColorThemeShared<P, ColorTypeLocation>;
 
 type ColorThemeGrid<P extends PD.Params> = {
-    readonly granularity: ColorTypeGrid
-    readonly grid: ColorVolume
-} & ColorThemeShared<P, ColorTypeGrid>
+    readonly granularity: ColorTypeGrid;
+    readonly grid: ColorVolume;
+} & ColorThemeShared<P, ColorTypeGrid>;
 
 type ColorThemeDirect<P extends PD.Params> = {
-    readonly granularity: ColorTypeDirect
-} & ColorThemeShared<P, ColorTypeDirect>
+    readonly granularity: ColorTypeDirect;
+} & ColorThemeShared<P, ColorTypeDirect>;
 
-type ColorTheme<P extends PD.Params, G extends ColorType = ColorTypeLocation> =
-    G extends ColorTypeLocation ? ColorThemeLocation<P> :
-        G extends ColorTypeGrid ? ColorThemeGrid<P> :
-            G extends ColorTypeDirect ? ColorThemeDirect<P> : never
+type ColorTheme<P extends PD.Params, G extends ColorType = ColorTypeLocation> = G extends ColorTypeLocation
+    ? ColorThemeLocation<P>
+    : G extends ColorTypeGrid
+    ? ColorThemeGrid<P>
+    : G extends ColorTypeDirect
+    ? ColorThemeDirect<P>
+    : never;
 
 namespace ColorTheme {
     export const Category = ColorThemeCategory;
 
     export interface Palette {
-        colors: Color[],
-        filter?: TextureFilter,
-        domain?: [number, number],
-        defaultColor?: Color,
+        colors: Color[];
+        filter?: TextureFilter;
+        domain?: [number, number];
+        defaultColor?: Color;
     }
 
-    export function Palette(list: ColorListEntry[], kind: 'set' | 'interpolate', domain?: [number, number], defaultColor?: Color): Palette {
+    export function Palette(
+        list: ColorListEntry[],
+        kind: 'set' | 'interpolate',
+        domain?: [number, number],
+        defaultColor?: Color
+    ): Palette {
         const colors: Color[] = [];
 
         const hasOffsets = list.every(c => Array.isArray(c));
@@ -149,16 +158,19 @@ namespace ColorTheme {
             colors,
             filter: kind === 'set' ? 'nearest' : 'linear',
             domain,
-            defaultColor,
+            defaultColor
         };
     }
 
     export const PaletteScale = (1 << 24) - 2; // reserve (1 << 24) - 1 for undefiend values
 
-    export type Props = { [k: string]: any }
-    export type Factory<P extends PD.Params, G extends ColorType> = (ctx: ThemeDataContext, props: PD.Values<P>) => ColorTheme<P, G>
+    export type Props = { [k: string]: any };
+    export type Factory<P extends PD.Params, G extends ColorType> = (
+        ctx: ThemeDataContext,
+        props: PD.Values<P>
+    ) => ColorTheme<P, G>;
     export const EmptyFactory = () => Empty;
-    const EmptyColor = Color(0xCCCCCC);
+    const EmptyColor = Color(0xcccccc);
     export const Empty: ColorTheme<{}> = {
         factory: EmptyFactory,
         granularity: 'uniform',
@@ -167,21 +179,95 @@ namespace ColorTheme {
     };
 
     export function areEqual(themeA: ColorTheme<any, any>, themeB: ColorTheme<any, any>) {
-        return themeA.contextHash === themeB.contextHash && themeA.factory === themeB.factory && deepEqual(themeA.props, themeB.props);
+        return (
+            themeA.contextHash === themeB.contextHash &&
+            themeA.factory === themeB.factory &&
+            deepEqual(themeA.props, themeB.props)
+        );
     }
 
-    export interface Provider<P extends PD.Params = any, Id extends string = string, G extends ColorType = ColorType> extends ThemeProvider<ColorTheme<P, G>, P, Id, G> { }
-    export const EmptyProvider: Provider<{}> = { name: '', label: '', category: '', factory: EmptyFactory, getParams: () => ({}), defaultValues: {}, isApplicable: () => true };
+    export interface Provider<P extends PD.Params = any, Id extends string = string, G extends ColorType = ColorType>
+        extends ThemeProvider<ColorTheme<P, G>, P, Id, G> {}
+    export const EmptyProvider: Provider<{}> = {
+        name: '',
+        label: '',
+        category: '',
+        factory: EmptyFactory,
+        getParams: () => ({}),
+        defaultValues: {},
+        isApplicable: () => true
+    };
 
-    export type Registry = ThemeRegistry<ColorTheme<any, any>>
+    export type Registry = ThemeRegistry<ColorTheme<any, any>>;
     export function createRegistry() {
         return new ThemeRegistry(BuiltIn as { [k: string]: Provider<any, any, any> }, EmptyProvider);
     }
 
+    // Prediction Color Theme
+    const DefaultPredictionColor = Color(0xcccccc);
+    const PredictionDescription = 'Assigns a color based on the predicted interface of an atom.';
+
+    export const PredictionColorThemeParams = {
+        domain: PD.Interval([0.0, 1.0]),
+        list: PD.ColorList('blue-white-red', { presetKind: 'scale' })
+    };
+    export type PredictionColorThemeParams = typeof PredictionColorThemeParams;
+    export function getPredictionColorThemeParams(ctx: ThemeDataContext) {
+        return PredictionColorThemeParams; // TODO return copy
+    }
+
+    export function getPrediction(unit: Unit, element: ElementIndex): number {
+        if (Unit.isAtomic(unit)) {
+            return unit.model.atomicConformation.occupancy.value(element);
+        } else {
+            return 0;
+        }
+    }
+
+    export function PredictionColorTheme(
+        ctx: ThemeDataContext,
+        props: PD.Values<PredictionColorThemeParams>
+    ): ColorTheme<PredictionColorThemeParams> {
+        const scale = ColorScale.create({
+            reverse: false,
+            domain: props.domain,
+            listOrName: props.list.colors
+        });
+
+        function color(location: Location): Color {
+            if (StructureElement.Location.is(location)) {
+                return scale.color(getPrediction(location.unit, location.element));
+            } else if (Bond.isLocation(location)) {
+                return scale.color(getPrediction(location.aUnit, location.aUnit.elements[location.aIndex]));
+            }
+            return DefaultPredictionColor;
+        }
+
+        return {
+            factory: PredictionColorTheme,
+            granularity: 'group',
+            color,
+            props,
+            description: PredictionDescription,
+            legend: scale ? scale.legend : undefined
+        };
+    }
+
+    export const PredictionColorThemeProvider: ColorTheme.Provider<PredictionColorThemeParams, 'prediction'> = {
+        name: 'prediction',
+        label: 'Prediction',
+        category: ColorTheme.Category.Atom,
+        factory: PredictionColorTheme,
+        getParams: getPredictionColorThemeParams,
+        defaultValues: PD.getDefaultValues(PredictionColorThemeParams),
+        isApplicable: (ctx: ThemeDataContext) =>
+            !!ctx.structure && ctx.structure.models.some(m => m.atomicConformation.occupancy.isDefined)
+    };
+
     export const BuiltIn = {
         'atom-id': AtomIdColorThemeProvider,
         'carbohydrate-symbol': CarbohydrateSymbolColorThemeProvider,
-        'cartoon': CartoonColorThemeProvider,
+        cartoon: CartoonColorThemeProvider,
         'chain-id': ChainIdColorThemeProvider,
         'element-index': ElementIndexColorThemeProvider,
         'element-symbol': ElementSymbolColorThemeProvider,
@@ -190,11 +276,11 @@ namespace ColorTheme {
         'external-structure': ExternalStructureColorThemeProvider,
         'external-volume': ExternalVolumeColorThemeProvider,
         'formal-charge': FormalChargeColorThemeProvider,
-        'hydrophobicity': HydrophobicityColorThemeProvider,
-        'illustrative': IllustrativeColorThemeProvider,
+        hydrophobicity: HydrophobicityColorThemeProvider,
+        illustrative: IllustrativeColorThemeProvider,
         'model-index': ModelIndexColorThemeProvider,
         'molecule-type': MoleculeTypeColorThemeProvider,
-        'occupancy': OccupancyColorThemeProvider,
+        occupancy: OccupancyColorThemeProvider,
         'operator-hkl': OperatorHklColorThemeProvider,
         'operator-name': OperatorNameColorThemeProvider,
         'partial-charge': PartialChargeColorThemeProvider,
@@ -206,18 +292,24 @@ namespace ColorTheme {
         'shape-group': ShapeGroupColorThemeProvider,
         'structure-index': StructureIndexColorThemeProvider,
         'trajectory-index': TrajectoryIndexColorThemeProvider,
-        'uncertainty': UncertaintyColorThemeProvider,
+        uncertainty: UncertaintyColorThemeProvider,
         'unit-index': UnitIndexColorThemeProvider,
-        'uniform': UniformColorThemeProvider,
-        'prediction': PredictionColorThemeProvider,
+        uniform: UniformColorThemeProvider,
+        prediction: PredictionColorThemeProvider,
         'volume-instance': VolumeInstanceColorThemeProvider,
         'volume-segment': VolumeSegmentColorThemeProvider,
-        'volume-value': VolumeValueColorThemeProvider,
+        'volume-value': VolumeValueColorThemeProvider
     };
-    type _BuiltIn = typeof BuiltIn
-    export type BuiltIn = keyof _BuiltIn
-    export type ParamValues<C extends ColorTheme.Provider<any>> = C extends ColorTheme.Provider<infer P> ? PD.Values<P> : never
-    export type BuiltInParams<T extends BuiltIn> = Partial<ParamValues<_BuiltIn[T]>>
+    type _BuiltIn = typeof BuiltIn;
+    export type BuiltIn = keyof _BuiltIn;
+    export type ParamValues<C extends ColorTheme.Provider<any>> = C extends ColorTheme.Provider<infer P>
+        ? PD.Values<P>
+        : never;
+    export type BuiltInParams<T extends BuiltIn> = Partial<ParamValues<_BuiltIn[T]>>;
 }
 
-export function ColorThemeProvider<P extends PD.Params, Id extends string>(p: ColorTheme.Provider<P, Id>): ColorTheme.Provider<P, Id> { return p; }
+export function ColorThemeProvider<P extends PD.Params, Id extends string>(
+    p: ColorTheme.Provider<P, Id>
+): ColorTheme.Provider<P, Id> {
+    return p;
+}

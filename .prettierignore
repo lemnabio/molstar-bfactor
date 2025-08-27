@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+package/
+
+# Build outputs
+lib/
+dist/
+build/
+*.tgz
+
+# Generated files
+*.d.ts
+*.js.map
+*.tsbuildinfo
+
+# Documentation build
+docs/site/
+
+# Data files
+data/
+examples/
+
+# Config files that should maintain their format
+*.min.js
+*.min.css
+
+# Lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db 

@@ -36,7 +36,7 @@ export const PlaneRepresentationProvider = StructureRepresentationProvider({
     factory: PlaneRepresentation,
     getParams: getPlaneParams,
     defaultValues: PD.getDefaultValues(PlaneParams),
-    defaultColorTheme: { name: 'element-symbol' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0,
     getData: (structure: Structure, props: PD.Values<PlaneParams>) => {

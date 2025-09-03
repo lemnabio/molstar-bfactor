@@ -308,7 +308,7 @@ export const ClashesRepresentationProvider = StructureRepresentationProvider({
     factory: ClashesRepresentation,
     getParams: getClashesParams,
     defaultValues: PD.getDefaultValues(ClashesParams),
-    defaultColorTheme: { name: 'uniform', props: { value: Color(0xFA28FF) } },
+    defaultColorTheme: { name: 'prediction', props: { value: Color(0xFA28FF) } },
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0,
     ensureCustomProperties: {

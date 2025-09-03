@@ -444,7 +444,7 @@ export const NtCTubeRepresentationProvider = StructureRepresentationProvider({
     factory: NtCTubeRepresentation,
     getParams: getNtCTubeParams,
     defaultValues: PD.getDefaultValues(NtCTubeParams),
-    defaultColorTheme: { name: 'ntc-tube' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform', props: { value: 2.0 } },
     isApplicable: (structure: Structure) => structure.models.every(m => Dnatco.isApplicable(m)),
     ensureCustomProperties: {

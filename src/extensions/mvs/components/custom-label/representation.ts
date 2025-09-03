@@ -44,7 +44,7 @@ export const CustomLabelRepresentationProvider = StructureRepresentationProvider
     factory: CustomLabelRepresentation,
     getParams: () => CustomLabelParams,
     defaultValues: PD.getDefaultValues(CustomLabelParams),
-    defaultColorTheme: { name: 'uniform' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0 && isMVSStructure(structure),
 });

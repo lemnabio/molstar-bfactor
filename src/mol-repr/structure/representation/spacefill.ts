@@ -55,7 +55,7 @@ export const SpacefillRepresentationProvider = StructureRepresentationProvider({
     factory: SpacefillRepresentation,
     getParams: getSpacefillParams,
     defaultValues: PD.getDefaultValues(SpacefillParams),
-    defaultColorTheme: { name: 'element-symbol' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0
 });

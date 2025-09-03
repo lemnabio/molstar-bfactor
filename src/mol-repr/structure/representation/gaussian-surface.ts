@@ -44,7 +44,7 @@ export const GaussianSurfaceRepresentationProvider = StructureRepresentationProv
     factory: GaussianSurfaceRepresentation,
     getParams: getGaussianSurfaceParams,
     defaultValues: PD.getDefaultValues(GaussianSurfaceParams),
-    defaultColorTheme: { name: 'chain-id' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0
 });

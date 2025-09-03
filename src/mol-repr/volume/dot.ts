@@ -338,7 +338,7 @@ export const DotRepresentationProvider = VolumeRepresentationProvider({
     factory: DotRepresentation,
     getParams: getDotParams,
     defaultValues: PD.getDefaultValues(DotParams),
-    defaultColorTheme: { name: 'uniform' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform' },
     isApplicable: (volume: Volume) => !Volume.isEmpty(volume) && !Volume.Segmentation.get(volume)
 });

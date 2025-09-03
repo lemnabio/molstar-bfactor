@@ -68,7 +68,7 @@ export const LineRepresentationProvider = StructureRepresentationProvider({
     factory: LineRepresentation,
     getParams: getLineParams,
     defaultValues: PD.getDefaultValues(LineParams),
-    defaultColorTheme: { name: 'element-symbol' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform' },
     isApplicable: (structure: Structure) => structure.elementCount > 0,
     getData: (structure: Structure, props: PD.Values<LineParams>) => {

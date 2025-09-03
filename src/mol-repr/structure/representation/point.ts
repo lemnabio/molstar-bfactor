@@ -45,7 +45,7 @@ export const PointRepresentationProvider = StructureRepresentationProvider({
     factory: PointRepresentation,
     getParams: getPointParams,
     defaultValues: PD.getDefaultValues(PointParams),
-    defaultColorTheme: { name: 'element-symbol' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform' },
     isApplicable: (structure: Structure) => structure.elementCount > 0
 });

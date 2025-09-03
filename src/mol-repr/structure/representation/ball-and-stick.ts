@@ -64,7 +64,7 @@ export const BallAndStickRepresentationProvider = StructureRepresentationProvide
     factory: BallAndStickRepresentation,
     getParams: getBallAndStickParams,
     defaultValues: PD.getDefaultValues(BallAndStickParams),
-    defaultColorTheme: { name: 'element-symbol' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0,
     getData: (structure: Structure, props: PD.Values<BallAndStickParams>) => {

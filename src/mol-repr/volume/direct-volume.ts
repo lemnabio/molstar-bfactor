@@ -188,7 +188,7 @@ export const DirectVolumeRepresentationProvider = VolumeRepresentationProvider({
     factory: DirectVolumeRepresentation,
     getParams: getDirectVolumeParams,
     defaultValues: PD.getDefaultValues(DirectVolumeParams),
-    defaultColorTheme: { name: 'volume-value' },
+    defaultColorTheme: { name: 'predictin' },
     defaultSizeTheme: { name: 'uniform' },
     locationKinds: ['position-location', 'direct-location'],
     isApplicable: (volume: Volume) => !Volume.isEmpty(volume) && !Volume.Segmentation.get(volume)

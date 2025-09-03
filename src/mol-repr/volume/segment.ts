@@ -343,7 +343,7 @@ export const SegmentRepresentationProvider = VolumeRepresentationProvider({
     factory: SegmentRepresentation,
     getParams: getSegmentParams,
     defaultValues: PD.getDefaultValues(SegmentParams),
-    defaultColorTheme: { name: 'volume-segment' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform' },
     isApplicable: (volume: Volume) => !Volume.isEmpty(volume) && !!Volume.Segmentation.get(volume)
 });

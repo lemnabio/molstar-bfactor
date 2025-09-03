@@ -44,7 +44,7 @@ export const MVSAnnotationLabelRepresentationProvider = StructureRepresentationP
     factory: MVSAnnotationLabelRepresentation,
     getParams: () => MVSAnnotationLabelParams,
     defaultValues: PD.getDefaultValues(MVSAnnotationLabelParams),
-    defaultColorTheme: { name: 'uniform' }, // this ain't workin
+    defaultColorTheme: { name: 'prediction' }, // this ain't workin
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0 && isMVSStructure(structure),
 });

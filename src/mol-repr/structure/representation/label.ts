@@ -39,7 +39,7 @@ export const LabelRepresentationProvider = StructureRepresentationProvider({
     factory: LabelRepresentation,
     getParams: getLabelParams,
     defaultValues: PD.getDefaultValues(LabelParams),
-    defaultColorTheme: { name: 'uniform' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'physical' },
     isApplicable: (structure: Structure) => structure.elementCount > 0
 });

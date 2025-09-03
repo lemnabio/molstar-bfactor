@@ -46,7 +46,7 @@ export const CarbohydrateRepresentationProvider = StructureRepresentationProvide
     factory: CarbohydrateRepresentation,
     getParams: getCarbohydrateParams,
     defaultValues: PD.getDefaultValues(CarbohydrateParams),
-    defaultColorTheme: { name: 'carbohydrate-symbol' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform' },
     isApplicable: (structure: Structure) => {
         return structure.models.some(m => Model.hasCarbohydrate(m));

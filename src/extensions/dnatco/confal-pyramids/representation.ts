@@ -196,7 +196,7 @@ export const ConfalPyramidsRepresentationProvider = StructureRepresentationProvi
     factory: ConfalPyramidsRepresentation,
     getParams: getConfalPyramidsParams,
     defaultValues: PD.getDefaultValues(ConfalPyramidsParams),
-    defaultColorTheme: { name: 'confal-pyramids' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform' },
     isApplicable: (structure: Structure) => structure.models.some(m => Dnatco.isApplicable(m)),
     ensureCustomProperties: {

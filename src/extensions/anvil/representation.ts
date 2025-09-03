@@ -79,7 +79,7 @@ export const MembraneOrientationRepresentationProvider = StructureRepresentation
     factory: MembraneOrientationRepresentation,
     getParams: getMembraneOrientationParams,
     defaultValues: PD.getDefaultValues(MembraneOrientationParams),
-    defaultColorTheme: { name: 'shape-group' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'shape-group' },
     isApplicable(structure: Structure) { return MembraneOrientationProvider.isApplicable(structure); },
     ensureCustomProperties: {

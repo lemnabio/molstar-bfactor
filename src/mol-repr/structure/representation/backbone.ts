@@ -55,7 +55,7 @@ export const BackboneRepresentationProvider = StructureRepresentationProvider({
     factory: BackboneRepresentation,
     getParams: getBackboneParams,
     defaultValues: PD.getDefaultValues(BackboneParams),
-    defaultColorTheme: { name: 'chain-id' },
+    defaultColorTheme: { name: 'prediction' },
     defaultSizeTheme: { name: 'uniform' },
     isApplicable: (structure: Structure) => structure.polymerResidueCount > 0,
 });
